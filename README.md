@@ -73,7 +73,7 @@ HLT**
 
 ---
 ### 项目说明
-hardware/CPU.circ : **Logisim-evolution 仿真文件**
+hardware/CPU.circ : **Logisim-evolution 仿真文件**  
 assembler/ : **汇编器代码文件**
 
 ---
