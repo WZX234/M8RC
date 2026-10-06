@@ -77,5 +77,11 @@ hardware/CPU.circ : **Logisim-evolution 仿真文件**
 assembler/ : **汇编器代码文件**
 
 ---
+## License
+
+- Hardware (hardware/, docs/): CERN-OHL-S-2.0
+- Software (assembler/): MIT
+  
+---
 ### 下一步
 **完成 CPU 仿真验证**
