@@ -17,8 +17,10 @@
 #define MAX_PARAMS 8    // 最大宏参数数量
 #define MAX_NAME   64   // 最大宏名长度
 #define MAX_VALUE  512  // 最大宏值长度
+#define MAX_INCLUDES 32 // 最大包含文件数量
 
 #define MAX_LINE_LENGTH 256 // 每行的最大长度
+#define MAX_LINE 1024  // 每行的最大长度(用于处理包含文件)
 
 char *trim(char *s);
 void preprocess(FILE *in, FILE *out);
@@ -36,6 +38,8 @@ typedef struct {
 Macro macros[MAX_MACROS];
 int macro_count = 0;
 
+char included_files[MAX_INCLUDES][256];
+int include_count = 0;
 int main (int argc, char *argv[])
 {
     //=========================================== 参数解析 =========================================
@@ -187,24 +191,24 @@ void preprocess(FILE *in, FILE *out)
         if (comment) *comment = '\0';       // 截断至注释前
         char *trimmed = trim(line);         // 去掉行首和行尾的空格
         if (trimmed[0] == '\0') continue;   // 如果这一行是空的，跳过
+        // 处理宏定义和包含文件
+        if (trimmed[0] == '.') {
+            if (strncmp(trimmed, ".define", 7) == 0) {
+                handle_define(trimmed);
+                continue;  // 不写入输出文件
+            }
+            if (strncmp(trimmed, ".include", 8) == 0) {
+                handle_include(trimmed, out, 0);
+                continue;
+            }
+        }
+        // 处理宏展开
+        if (!expand_line(trimmed, out)) {
+            // 不是宏，原样写入 out
+            fputs(trimmed, out);
+            fputc('\n', out);
+        }
     }
-    fclose(in);
-    return 0;
-}
-
-char *trim(char *s)
-{
-    // 去掉开头空格
-    while (*s == ' ' || *s == '\t') s++;
-    
-    // 去掉尾部空格
-    char *end = s + strlen(s) - 1;
-    while (end > s && (*end == ' ' || *end == '\t')) {
-        *end = '\0';
-        end--;
-    }
-    
-    return s;
 }
 
 // 处理宏定义
@@ -222,7 +226,7 @@ void handle_define(const char *line)
     name[i] = '\0';
     
     Macro *m = &macros[macro_count];
-    strcpy(m->name, name);  // 复制宏名
+    strcpy(m->name, name);
     m->param_count = 0;
     
     // 解析参数
@@ -245,42 +249,99 @@ void handle_define(const char *line)
     // 跳过空白
     while (*p == ' ' || *p == '\t') p++;
     
-    // 提取宏值（整行，包含 ; 分隔的多条指令）
+    // 提取宏值(整行，含 ; 分隔的多条指令)
     strcpy(m->value, p);
     
     macro_count++;
 }
 
-// 查找宏定义
-Macro *find_macro(const char *name) {
-    for (int i = 0; i < macro_count; i++) {
-        if (strcmp(macros[i].name, name) == 0)  // 如果宏名匹配
-            return &macros[i];
+int handle_include(const char *line, FILE *out, int depth) {
+    // 1. 深度检查
+    if (depth > 16) {
+        fprintf(stderr, RED"Error:"RESET" Include depth exceeded\n");
+        return 0;
     }
-    // 如果没有找到，返回 NULL
-    return NULL;
-}
-
-// 替换宏中的参数
-void replace_word(char *result, const char *word, const char *replacement) {
-    char temp[MAX_VALUE]; // 临时缓冲区
-    char *p = result;     // 指向原始字符串
-    char *out = temp;     // 指向输出缓冲区
     
-    while (*p) {
-        if (strncmp(p, word, strlen(word)) == 0) {
-            int before_ok = (p == result || !isalnum(*(p-1)));
-            int after_ok = !isalnum(*(p + strlen(word)));
-            if (before_ok && after_ok) {
-                strcpy(out, replacement);
-                out += strlen(replacement);
-                p += strlen(word);
+    // 2. 解析文件名
+    char filename[256] = "";
+    if (sscanf(line, ".include \"%[^\"]\"", filename) != 1) {
+        fprintf(stderr, RED"Error:"RESET" Invalid include syntax: %s\n", line);
+        return 0;
+    }
+    
+    // 3. 循环包含检查
+    for (int i = 0; i < include_count; i++) {
+        if (strcmp(included_files[i], filename) == 0) {
+            fprintf(stderr, RED"Error:"RESET" Circular include: %s\n", filename);
+            return 0;
+        }
+    }
+    
+    // 4. 记录已包含文件
+    if (include_count < MAX_INCLUDES) {
+        strcpy(included_files[include_count], filename);
+        include_count++;
+    } else {
+        fprintf(stderr, RED"Error:"RESET" Too many includes\n");
+        return 0;
+    }
+    
+    // 5. 打开文件
+    FILE *inc = fopen(filename, "r");
+    if (!inc) {
+        fprintf(stderr, RED"Error:"RESET" Cannot open include: %s\n", filename);
+        include_count--;  // 回退记录
+        return 0;
+    }
+    
+    // 6. 逐行处理
+    char buf[MAX_LINE];
+    while (fgets(buf, sizeof(buf), inc)) {
+        // 检测截断
+        size_t len = strlen(buf);
+        if (len == sizeof(buf) - 1 && buf[len-1] != '\n') {
+            fprintf(stderr, RED"Error:"RESET" Line too long in %s\n", filename);
+            int c;
+            while ((c = fgetc(inc)) != '\n' && c != EOF);
+            continue;
+        }
+        
+        // 去换行
+        buf[strcspn(buf, "\r\n")] = '\0';
+        
+        // 去注释
+        char *comment = strchr(buf, '#');
+        if (comment) *comment = '\0';
+        
+        // 去空格
+        char *trimmed = trim(buf);
+        if (trimmed[0] == '\0') continue;
+        
+        // 预处理指令
+        if (trimmed[0] == '.') {
+            if (strncmp(trimmed, ".define", 7) == 0) {
+                handle_define(trimmed);
+                continue;
+            }
+            if (strncmp(trimmed, ".include", 8) == 0) {
+                handle_include(trimmed, out, depth + 1);
                 continue;
             }
         }
-        *out++ = *p++;
+        
+        // 宏展开
+        int r = expand_line(trimmed, out);
+        if (r < 0) {
+            // 不是宏，原样输出
+            fputs(trimmed, out);
+            fputc('\n', out);
+        }
     }
-    *out = '\0';
-    strcpy(result, temp);
+    
+    fclose(inc);
+    
+    // 7. 处理完毕，从列表中移除
+    include_count--;
+    
+    return 1;
 }
-
