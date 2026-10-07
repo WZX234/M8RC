@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 // ANSI color codes
 #define RED      "\033[91m"
@@ -22,18 +23,21 @@
 #define MAX_LINE_LENGTH 256 // 每行的最大长度
 #define MAX_LINE 1024  // 每行的最大长度(用于处理包含文件)
 
-char *trim(char *s);
-void preprocess(FILE *in, FILE *out);
-void handle_define(const char *line);
-Macro *find_macro(const char *name);
-void replace_word(char *result, const char *word, const char *replacement);
-
 typedef struct {
     char name[MAX_NAME];               // 宏名，如 "INC"
     char params[MAX_PARAMS][MAX_NAME]; // 参数名，如 ["r"]
     int param_count;                   // 参数个数，如 1
     char value[MAX_VALUE];             // 宏值，如 "ADDI r, 1"
 } Macro;
+
+char *trim(char *s);
+void preprocess(FILE *in, FILE *out);
+void handle_define(const char *line);
+Macro *find_macro(const char *name);
+void replace_word(char *result, const char *word, const char *replacement);
+int expand_line(const char *line, FILE *out);
+int handle_include(const char *line, FILE *out, int depth);
+
 
 Macro macros[MAX_MACROS];
 int macro_count = 0;
@@ -352,7 +356,8 @@ int handle_include(const char *line, FILE *out, int depth) {
 }
 
 // 展开宏，如果是宏则返回 1，否则返回 0
-int expand_line(const char *line, FILE *out) {
+int expand_line(const char *line, FILE *out)
+{
     // 提取第一个词（宏名）
     char name[MAX_NAME];
     int i = 0;
@@ -429,4 +434,31 @@ void replace_word(char *result, const char *word, const char *replacement) {
     }
     *out = '\0';
     strcpy(result, temp);
+}
+
+// 查找宏定义
+Macro *find_macro(const char *name) {
+    for (int i = 0; i < macro_count; i++) {
+        if (strcmp(macros[i].name, name) == 0) {
+            return &macros[i];
+        }
+    }
+    return NULL;
+}
+
+char *trim(char *s) {
+    // 去掉首部空格和制表符
+    while (*s == ' ' || *s == '\t') s++;
+    
+    // 如果全是空格，直接返回
+    if (*s == '\0') return s;
+    
+    // 去掉尾部空格和制表符
+    char *end = s + strlen(s) - 1;
+    while (end > s && (*end == ' ' || *end == '\t')) {
+        *end = '\0';
+        end--;
+    }
+    
+    return s;
 }
