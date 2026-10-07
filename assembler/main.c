@@ -16,9 +16,15 @@
 #define MAX_MACROS 256  // 最大宏定义数量
 #define MAX_PARAMS 8    // 最大宏参数数量
 #define MAX_NAME   64   // 最大宏名长度
-#define MAX_VALUE  256  // 最大宏值长度
+#define MAX_VALUE  512  // 最大宏值长度
 
 #define MAX_LINE_LENGTH 256 // 每行的最大长度
+
+char *trim(char *s);
+void preprocess(FILE *in, FILE *out);
+void handle_define(const char *line);
+Macro *find_macro(const char *name);
+void replace_word(char *result, const char *word, const char *replacement);
 
 typedef struct {
     char name[MAX_NAME];               // 宏名，如 "INC"
@@ -26,6 +32,9 @@ typedef struct {
     int param_count;                   // 参数个数，如 1
     char value[MAX_VALUE];             // 宏值，如 "ADDI r, 1"
 } Macro;
+
+Macro macros[MAX_MACROS];
+int macro_count = 0;
 
 int main (int argc, char *argv[])
 {
@@ -155,30 +164,21 @@ int main (int argc, char *argv[])
         return 1;
     }
 
-    // 打开输出文件
-    FILE *output_file = fopen(output, "w");
-    if (!output_file)
-    {
-        fprintf(stderr, RED"Error:"RESET" Could not open output file: %s\n", output);
+    // 创建临时文件
+    FILE *tmp = fopen("tmp.asm", "w");
+    if (!tmp) {
+        fprintf(stderr, RED"Error:"RESET" Cannot create tmp.asm\n");
         fclose(input_file);
         return 1;
     }
+}
 
-    // 打开列表文件
-    FILE *lst = NULL;
-    if (listing) {
-        lst = fopen(listing, "w");
-        if (lst) {
-            fprintf(lst, "| 地址 | 机器码 | 源码 |\n");
-            fprintf(lst, "|:---|:---|:---|\n");
-        }
-    }
-    
-    //=========================================== 汇编处理 =========================================
+void preprocess(FILE *in, FILE *out)
+{
     char line[MAX_LINE_LENGTH]; // 每行的缓冲区
     int line_num = 0;           // 当前行号
 
-    while (fgets(line, sizeof(line), input_file))
+    while (fgets(line, sizeof(line), in))
     {
         line_num++;
         // 处理这一行
@@ -188,7 +188,7 @@ int main (int argc, char *argv[])
         char *trimmed = trim(line);         // 去掉行首和行尾的空格
         if (trimmed[0] == '\0') continue;   // 如果这一行是空的，跳过
     }
-    fclose(input_file);
+    fclose(in);
     return 0;
 }
 
@@ -206,3 +206,81 @@ char *trim(char *s)
     
     return s;
 }
+
+// 处理宏定义
+void handle_define(const char *line)
+{
+    const char *p = line + 7;  // 跳过 ".define"
+    while (*p == ' ' || *p == '\t') p++;
+    
+    // 提取宏名
+    char name[MAX_NAME];
+    int i = 0;
+    while (*p && *p != '(' && *p != ' ' && *p != '\t' && i < MAX_NAME-1) {
+        name[i++] = *p++;
+    }
+    name[i] = '\0';
+    
+    Macro *m = &macros[macro_count];
+    strcpy(m->name, name);  // 复制宏名
+    m->param_count = 0;
+    
+    // 解析参数
+    if (*p == '(') {
+        p++;
+        while (*p && *p != ')') {
+            while (*p == ' ' || *p == '\t') p++;
+            int j = 0;
+            while (*p && *p != ',' && *p != ')' && *p != ' ') {
+                m->params[m->param_count][j++] = *p++;
+            }
+            m->params[m->param_count][j] = '\0';
+            m->param_count++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == ',') p++;
+        }
+        if (*p == ')') p++;
+    }
+    
+    // 跳过空白
+    while (*p == ' ' || *p == '\t') p++;
+    
+    // 提取宏值（整行，包含 ; 分隔的多条指令）
+    strcpy(m->value, p);
+    
+    macro_count++;
+}
+
+// 查找宏定义
+Macro *find_macro(const char *name) {
+    for (int i = 0; i < macro_count; i++) {
+        if (strcmp(macros[i].name, name) == 0)  // 如果宏名匹配
+            return &macros[i];
+    }
+    // 如果没有找到，返回 NULL
+    return NULL;
+}
+
+// 替换宏中的参数
+void replace_word(char *result, const char *word, const char *replacement) {
+    char temp[MAX_VALUE]; // 临时缓冲区
+    char *p = result;     // 指向原始字符串
+    char *out = temp;     // 指向输出缓冲区
+    
+    while (*p) {
+        if (strncmp(p, word, strlen(word)) == 0) {
+            int before_ok = (p == result || !isalnum(*(p-1)));
+            int after_ok = !isalnum(*(p + strlen(word)));
+            if (before_ok && after_ok) {
+                strcpy(out, replacement);
+                out += strlen(replacement);
+                p += strlen(word);
+                continue;
+            }
+        }
+        *out++ = *p++;
+    }
+    *out = '\0';
+    strcpy(result, temp);
+}
+
