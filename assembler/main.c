@@ -175,6 +175,11 @@ int main (int argc, char *argv[])
         fclose(input_file);
         return 1;
     }
+    // 运行预处理器
+    preprocess(input_file, tmp);
+    // 关闭输入文件和临时文件
+    fclose(input_file);
+    fclose(tmp);
 }
 
 void preprocess(FILE *in, FILE *out)
