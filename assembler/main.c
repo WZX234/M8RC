@@ -27,6 +27,11 @@
 
 #define MAX_LABELS 256  // 最大标签数量
 
+// 报错级别
+#define LEVEL_ERROR   0
+#define LEVEL_WARNING 1
+#define LEVEL_NOTICE  2
+
 // 宏定义结构体
 typedef struct {
     char name[MAX_NAME];               // 宏名，如 "INC"
@@ -71,15 +76,20 @@ int label_count = 0;
 char included_files[MAX_INCLUDES][256];
 int include_count = 0;
 
+//=========================== 日志级别 ===========================
+const char *level_names[] = {"Error", "Warning", "Notice"};
+const char *level_colors[] = {RED, YELLOW, CYAN};
+
+//=========================== 命令行参数 ===========================
+char *input = NULL;     // 输入文件名
+char *output = "a.out"; // 输出文件名
+char *format = "bin";   // 输出格式
+char *listing = NULL;   // 汇编列表文件名
+int quiet = 0;          // 安静模式标志
+
 int main (int argc, char *argv[])
 {
     //=========================================== 参数解析 =========================================
-
-    char *input = NULL;     // 输入文件名
-    char *output = "a.out"; // 输出文件名
-    char *format = "bin";   // 输出格式
-    char *listing = NULL;   // 汇编列表文件名
-    int quiet = 0;          // 安静模式标志
 
     for (int i = 1; i < argc; i++)
     {
@@ -690,4 +700,53 @@ char *extract_label(const char *line) {
 int instruction_size(const char *line) {
     // 所有指令都是16位
     return INSTRUCTION_SIZE;
+}
+
+// 报错函数
+// filename: 源文件名
+// line_num: 行号
+// source: 源代码行（未经处理）
+// col: 错误起始位置（列号，从0开始）
+// len: 错误长度（字符数）
+// level: 级别
+// fmt: 错误信息格式
+void error_msg(const char *filename, int line_num, const char *source,
+               int col, int len, int level, const char *fmt, ...)
+{
+    // 安静模式只输出 Error
+    if (quiet && level != LEVEL_ERROR) return;
+    
+    // 第一行：文件名和行号
+    fprintf(stderr, "File \"%s\", line %d\n", filename, line_num);
+    
+    // 第二行：源代码
+    fprintf(stderr, "\t%s\n", source);
+    
+    // 第三行：^ 对齐
+    fprintf(stderr, "\t");
+    for (int i = 0; i < col; i++) {
+        // 制表符按 4 空格算
+        if (source[i] == '\t') fprintf(stderr, "    ");
+        else fputc(' ', stderr);
+    }
+    fprintf(stderr, "%s", level_colors[level]);
+    for (int i = 0; i < len; i++) {
+        fputc('^', stderr);
+    }
+    fprintf(stderr, "\n");
+    
+    // 第四行：错误信息
+    fprintf(stderr, "%s%s : " RESET, level_colors[level], level_names[level]);
+    
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    
+    fprintf(stderr, "\n");
+    
+    // Error 退出
+    if (level == LEVEL_ERROR) {
+        exit(1);
+    }
 }

@@ -705,6 +705,11 @@
     <comp lib="9" loc="(1060,1280)" name="Text">
       <a name="text" val="HLT"/>
     </comp>
+    <comp lib="9" loc="(1089,1129)" name="Text">
+      <a name="color" val="#ff0021"/>
+      <a name="font" val="圆构黑体 CHS bold 39"/>
+      <a name="text" val="搞SYSCALL！"/>
+    </comp>
     <comp lib="9" loc="(1105,1610)" name="Text">
       <a name="text" val="影子PC"/>
     </comp>
@@ -716,6 +721,16 @@
     </comp>
     <comp lib="9" loc="(1295,1605)" name="Text">
       <a name="text" val="PC"/>
+    </comp>
+    <comp lib="9" loc="(3053,2152)" name="Text">
+      <a name="color" val="#ff002b"/>
+      <a name="font" val="圆构黑体 CHS bold 39"/>
+      <a name="text" val="加IO！"/>
+    </comp>
+    <comp lib="9" loc="(3068,1455)" name="Text">
+      <a name="color" val="#ff002c"/>
+      <a name="font" val="圆构黑体 CHS bold 39"/>
+      <a name="text" val="加更新标志位选择！"/>
     </comp>
     <comp lib="9" loc="(610,1325)" name="Text">
       <a name="text" val="中断信号"/>
