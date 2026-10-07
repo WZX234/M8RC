@@ -14,6 +14,8 @@
 // information
 #define VERSION "0.0.1"
 
+#define INSTRUCTION_SIZE 1  // 每条指令占用的字节数（16位 = 2字节）
+
 #define MAX_MACROS   256  // 最大宏定义数量
 #define MAX_PARAMS   8    // 最大宏参数数量
 #define MAX_NAME     64   // 最大宏名长度
@@ -21,8 +23,11 @@
 #define MAX_INCLUDES 32 // 最大包含文件数量
 
 #define MAX_LINE_LENGTH 256 // 每行的最大长度
-#define MAX_LINE 1024  // 每行的最大长度(用于处理包含文件)
+#define MAX_LINE   1024 // 每行的最大长度(用于处理包含文件)
 
+#define MAX_LABELS 256  // 最大标签数量
+
+// 宏定义结构体
 typedef struct {
     char name[MAX_NAME];               // 宏名，如 "INC"
     char params[MAX_PARAMS][MAX_NAME]; // 参数名，如 ["r"]
@@ -30,21 +35,42 @@ typedef struct {
     char value[MAX_VALUE];             // 宏值，如 "ADDI r, 1"
 } Macro;
 
-char *trim(char *s);
-void preprocess(FILE *in, FILE *out);
-void handle_define(const char *line);
-Macro *find_macro(const char *name);
-void replace_word(char *result, const char *word, const char *replacement);
-int expand_line(const char *line, FILE *out);
-int handle_include(const char *line, FILE *out, int depth);
-int expand_param_macro(const char *line, Macro *m, FILE *out);
-int replace_all_macros(char *line);
+// 标签结构体
+typedef struct {
+    char name[MAX_NAME];  // 标签名，如 "LOOP"
+    int addr;             // 标签地址，如 0x100
+} Label;
 
+char  *trim(char *s);
+void  preprocess(FILE *in, FILE *out);
+void  handle_define(const char *line);
+Macro *find_macro(const char *name);
+void  replace_word(char *result, const char *word, const char *replacement);
+int   expand_line(const char *line, FILE *out);
+int   handle_include(const char *line, FILE *out, int depth);
+int   expand_param_macro(const char *line, Macro *m, FILE *out);
+int   replace_all_macros(char *line);
+void  add_label(const char *name, int addr);
+int   find_label(const char *name);
+int   pass1(FILE *in);
+int   is_label(const char *line);
+int   instruction_size(const char *line);
+char  *extract_label(const char *line);
+
+//=========================== 全局变量 ===========================
+
+// 宏定义表
 Macro macros[MAX_MACROS];
 int macro_count = 0;
 
+// 标签表
+Label labels[MAX_LABELS];
+int label_count = 0;
+
+// 包含文件栈
 char included_files[MAX_INCLUDES][256];
 int include_count = 0;
+
 int main (int argc, char *argv[])
 {
     //=========================================== 参数解析 =========================================
@@ -182,6 +208,9 @@ int main (int argc, char *argv[])
     }
     // 运行预处理器
     preprocess(input_file, tmp);
+    // 运行第一遍扫描
+    rewind(tmp);
+    pass1(tmp);
     // 关闭输入文件和临时文件
     fclose(input_file);
     fclose(tmp);
@@ -360,7 +389,8 @@ int handle_include(const char *line, FILE *out, int depth)
 // 返回值：
 //   >= 0：是宏，返回写入的行数
 //   -1：不是宏，未写入
-int expand_line(const char *line, FILE *out) {
+int expand_line(const char *line, FILE *out)
+{
     // 提取第一个词
     char first[MAX_NAME];
     int i = 0;
@@ -416,7 +446,8 @@ int expand_line(const char *line, FILE *out) {
 }
 
 // 替换宏参数
-void replace_word(char *result, const char *word, const char *replacement) {
+void replace_word(char *result, const char *word, const char *replacement)
+{
     char temp[MAX_VALUE];
     char *p = result;
     char *out = temp;
@@ -470,7 +501,8 @@ char *trim(char *s) {
 // m: 宏定义
 // out: 输出文件
 // 返回：写入的行数
-int expand_param_macro(const char *line, Macro *m, FILE *out) {
+int expand_param_macro(const char *line, Macro *m, FILE *out)
+{
     // 跳过宏名
     const char *p = line;
     while (*p && *p != ' ' && *p != '\t') p++;
@@ -526,7 +558,8 @@ int expand_param_macro(const char *line, Macro *m, FILE *out) {
 }
 
 // 替换一行中所有无参宏，返回替换次数
-int replace_all_macros(char *line) {
+int replace_all_macros(char *line)
+{
     char temp[MAX_VALUE];
     strcpy(temp, line);
     
@@ -542,7 +575,7 @@ int replace_all_macros(char *line) {
             char *start = p;
             
             // 提取标识符
-            while ((isalnum((unsigned char)(unsigned char)*p) || *p == '_') && i < MAX_NAME-1) {
+            while ((isalnum((unsigned char)*p) || *p == '_') && i < MAX_NAME-1) {
                 ident[i++] = *p++;
             }
             ident[i] = '\0';
@@ -565,4 +598,96 @@ int replace_all_macros(char *line) {
     *outp = '\0';
     
     return changed;
+}
+
+// 添加标签
+void add_label(const char *name, int addr)
+{
+    strcpy(labels[label_count].name, name);
+    labels[label_count].addr = addr;
+    label_count++;
+}
+
+// 查找标签地址
+int find_label(const char *name)
+{
+    for (int i = 0; i < label_count; i++) {
+        if (strcmp(labels[i].name, name) == 0)
+            return labels[i].addr;
+    }
+    return -1;
+}
+
+// 第一遍扫描：收集标签地址
+// 返回总字节数
+int pass1(FILE *in)
+{
+    int addr = 0;
+    char line[MAX_LINE];
+    
+    while (fgets(line, sizeof(line), in)) {
+        // 去掉行尾换行
+        line[strcspn(line, "\r\n")] = '\0';
+        
+        // 去掉注释
+        char *comment = strchr(line, '#');
+        if (comment) *comment = '\0';
+        
+        // 去掉首尾空格
+        char *trimmed = trim(line);
+        if (trimmed[0] == '\0') continue;
+        
+        if (is_label(trimmed)) {
+            char *label = extract_label(trimmed);
+            add_label(label, addr);
+            
+            // 检查标签后是否还有指令
+            char *rest = strchr(trimmed, ':') + 1;
+            rest = trim(rest);
+            if (rest[0] != '\0') {
+                addr += instruction_size(rest);
+            }
+            continue;
+        }
+        
+        // 普通指令，地址递增
+        addr += instruction_size(trimmed);
+    }
+    
+    return addr;
+}
+
+// 检查是否是标签行
+// 格式：LABEL: 或 LABEL:
+int is_label(const char *line) {
+    // 找冒号
+    const char *colon = strchr(line, ':');
+    if (!colon) return 0;
+    
+    // 冒号前必须是合法标识符
+    for (const char *p = line; p < colon; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '_') return 0;
+    }
+    
+    // 冒号前不能为空
+    if (colon == line) return 0;
+    
+    return 1;
+}
+
+// 提取标签名
+char *extract_label(const char *line) {
+    static char label[MAX_NAME];
+    const char *colon = strchr(line, ':');
+    int len = colon - line;
+    if (len >= MAX_NAME) len = MAX_NAME - 1;
+    strncpy(label, line, len);
+    label[len] = '\0';
+    return label;
+}
+
+// 返回一条指令占几个字节
+int instruction_size(const char *line) {
+    // 所有指令都是16位
+    return INSTRUCTION_SIZE;
 }
