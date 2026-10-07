@@ -13,6 +13,20 @@
 // information
 #define VERSION "0.0.1"
 
+#define MAX_MACROS 256  // 最大宏定义数量
+#define MAX_PARAMS 8    // 最大宏参数数量
+#define MAX_NAME   64   // 最大宏名长度
+#define MAX_VALUE  256  // 最大宏值长度
+
+#define MAX_LINE_LENGTH 256 // 每行的最大长度
+
+typedef struct {
+    char name[MAX_NAME];               // 宏名，如 "INC"
+    char params[MAX_PARAMS][MAX_NAME]; // 参数名，如 ["r"]
+    int param_count;                   // 参数个数，如 1
+    char value[MAX_VALUE];             // 宏值，如 "ADDI r, 1"
+} Macro;
+
 int main (int argc, char *argv[])
 {
     //=========================================== 参数解析 =========================================
@@ -33,6 +47,11 @@ int main (int argc, char *argv[])
             puts(GREEN"Options:"RESET);
             puts("  "YELLOW"--help, -h   "RESET" Show this help message and exit");
             puts("  "YELLOW"--version, -v"RESET" Show the version of the assembler and exit");
+            puts("  "YELLOW"--input, -i  "RESET" Specify the input assembly file (required)");
+            puts("  "YELLOW"--output, -o "RESET" Specify the output file (default: a.out)");
+            puts("  "YELLOW"--format, -f "RESET" Specify the output format (default: bin)");
+            puts("  "YELLOW"--listing, -l"RESET" Specify the listing file (optional)");
+            puts("  "YELLOW"--quiet, -q  "RESET" Enable quiet mode (suppress output messages)");
             return 0;
         }
         
@@ -129,19 +148,19 @@ int main (int argc, char *argv[])
     //=========================================== 文件打开 =========================================
 
     // 打开输入文件
-    FILE *input = fopen(input, "r");
-    if (!input)
+    FILE *input_file = fopen(input, "r");
+    if (!input_file)
     {
         fprintf(stderr, RED"Error:"RESET" Could not open input file: %s\n", input);
         return 1;
     }
 
     // 打开输出文件
-    FILE *output = fopen(output, "w");
-    if (!output)
+    FILE *output_file = fopen(output, "w");
+    if (!output_file)
     {
         fprintf(stderr, RED"Error:"RESET" Could not open output file: %s\n", output);
-        fclose(input);
+        fclose(input_file);
         return 1;
     }
 
@@ -155,5 +174,35 @@ int main (int argc, char *argv[])
         }
     }
     
+    //=========================================== 汇编处理 =========================================
+    char line[MAX_LINE_LENGTH]; // 每行的缓冲区
+    int line_num = 0;           // 当前行号
+
+    while (fgets(line, sizeof(line), input_file))
+    {
+        line_num++;
+        // 处理这一行
+        line[strcspn(line, "\r\n")] = '\0'; // 去掉行尾换行
+        char *comment = strchr(line, '#');  // 查找注释的起始位置
+        if (comment) *comment = '\0';       // 截断至注释前
+        char *trimmed = trim(line);         // 去掉行首和行尾的空格
+        if (trimmed[0] == '\0') continue;   // 如果这一行是空的，跳过
+    }
+    fclose(input_file);
     return 0;
+}
+
+char *trim(char *s)
+{
+    // 去掉开头空格
+    while (*s == ' ' || *s == '\t') s++;
+    
+    // 去掉尾部空格
+    char *end = s + strlen(s) - 1;
+    while (end > s && (*end == ' ' || *end == '\t')) {
+        *end = '\0';
+        end--;
+    }
+    
+    return s;
 }
