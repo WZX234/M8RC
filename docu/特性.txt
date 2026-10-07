@@ -1,0 +1,11 @@
+带loop 形式的所有跳转指令自动转F/B（loop >= 指令）？F：B
+JUMRF / JUMRB 没有 loop 形式
+若 loop 超出立即数范围，return 1；退出即可
+除HLT外NV 填 0 即可，HLT 中 NV 填 1
+语法错误报错格式示例：
+File "C:\Users\dell\AppData\a.asm", line 1
+	ADD R0, 1, R1
+            ^
+Error : The name "1" is not a valid register name.
+
+需显示文件名和行数，^需对齐错误位置（源文件中未经处理的行）（示例中为1），Error可替换为 Warning 或 Notice ，Error退出，其余继续，若带有安静模式参数则只输出Error，依具体情况而异，后接原因，整个报错使用彩色输出，可实现为一个报错函数
