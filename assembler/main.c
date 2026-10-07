@@ -345,3 +345,83 @@ int handle_include(const char *line, FILE *out, int depth) {
     
     return 1;
 }
+
+// 展开宏，如果是宏则返回 1，否则返回 0
+int expand_line(const char *line, FILE *out) {
+    // 提取第一个词（宏名）
+    char name[MAX_NAME];
+    int i = 0;
+    while (line[i] && line[i] != ' ' && line[i] != '\t' && i < MAX_NAME-1) {
+        name[i] = line[i];
+        i++;
+    }
+    name[i] = '\0';
+    
+    // 查找宏
+    Macro *m = find_macro(name);
+    if (!m) return 0;  // 不是宏
+    
+    // 跳过宏名和空白
+    const char *p = line + i;
+    while (*p == ' ' || *p == '\t') p++;
+    
+    // 解析参数
+    char args[MAX_PARAMS][MAX_NAME];
+    int arg_count = 0;
+    while (*p && arg_count < MAX_PARAMS) {
+        int j = 0;
+        while (*p && *p != ',' && j < MAX_NAME-1) {
+            args[arg_count][j++] = *p++;
+        }
+        args[arg_count][j] = '\0';
+        while (j > 0 && args[arg_count][j-1] == ' ') {
+            args[arg_count][--j] = '\0';
+        }
+        arg_count++;
+        if (*p == ',') p++;
+    }
+    
+    // 按 ; 切分宏值，逐条展开
+    char value_copy[MAX_VALUE];
+    strcpy(value_copy, m->value);
+    
+    char *segment = strtok(value_copy, ";");
+    while (segment) {
+        char *trimmed_seg = trim(segment);
+        if (trimmed_seg[0] != '\0') {
+            char expanded[MAX_VALUE];
+            strcpy(expanded, trimmed_seg);
+            for (int k = 0; k < m->param_count && k < arg_count; k++) {
+                replace_word(expanded, m->params[k], args[k]);
+            }
+            fputs(expanded, out);
+            fputc('\n', out);
+        }
+        segment = strtok(NULL, ";");
+    }
+    
+    return 1;
+}
+
+// 替换宏参数
+void replace_word(char *result, const char *word, const char *replacement) {
+    char temp[MAX_VALUE];
+    char *p = result;
+    char *out = temp;
+    
+    while (*p) {
+        if (strncmp(p, word, strlen(word)) == 0) {
+            int before_ok = (p == result || !isalnum(*(p-1)));
+            int after_ok = !isalnum(*(p + strlen(word)));
+            if (before_ok && after_ok) {
+                strcpy(out, replacement);
+                out += strlen(replacement);
+                p += strlen(word);
+                continue;
+            }
+        }
+        *out++ = *p++;
+    }
+    *out = '\0';
+    strcpy(result, temp);
+}
