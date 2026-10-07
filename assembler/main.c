@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdint.h>
 
 // ANSI color codes
 #define RED      "\033[91m"
@@ -34,6 +35,62 @@
 #define LEVEL_WARNING 1
 #define LEVEL_NOTICE  2
 
+// 格式类型
+#define FMT_NONE    0
+#define FMT_RD      1
+#define FMT_RR      2
+#define FMT_RRI     3
+#define FMT_IMM8    4
+#define FMT_STORE   5
+#define FMT_CALL    6
+#define FMT_SYSCALL 7
+
+typedef struct {
+    const char *mnemonic;
+    uint16_t opcode;
+    uint16_t ext;
+    int format;
+} Instruction;
+
+Instruction instructions[] = {
+    {"NOP",    0x0, 0x0, FMT_NONE},
+    {"ADDI",   0x1, 0x0, FMT_RRI},
+    {"SUBI",   0x2, 0x0, FMT_RRI},
+    {"ANDI",   0x3, 0x0, FMT_RRI},
+    {"ORI",    0x4, 0x0, FMT_RRI},
+    {"XORI",   0x5, 0x0, FMT_RRI},
+    {"CMPI",   0x6, 0x0, FMT_RRI},
+    {"LOAD",   0x7, 0x0, FMT_RRI},
+    {"STORE",  0x8, 0x0, FMT_STORE},
+    {"CALLF",  0x9, 0x0, FMT_CALL},
+    {"CALLB",  0xA, 0x0, FMT_CALL},
+    {"ADD",    0xB, 0x0, FMT_RR},
+    {"ADC",    0xB, 0x1, FMT_RR},
+    {"SUB",    0xB, 0x2, FMT_RR},
+    {"SBC",    0xB, 0x3, FMT_RR},
+    {"AND",    0xB, 0x4, FMT_RR},
+    {"OR",     0xB, 0x5, FMT_RR},
+    {"XOR",    0xB, 0x6, FMT_RR},
+    {"RIGHT",  0xB, 0x7, FMT_RD},
+    {"CMP",    0xB, 0x8, FMT_RR},
+    {"JUMPF",  0xC, 0x0, FMT_IMM8},
+    {"JUMPB",  0xC, 0x1, FMT_IMM8},
+    {"JCF",    0xC, 0x2, FMT_IMM8},
+    {"JCB",    0xC, 0x3, FMT_IMM8},
+    {"JEF",    0xC, 0x4, FMT_IMM8},
+    {"JEB",    0xC, 0x5, FMT_IMM8},
+    {"JROF",   0xC, 0x6, FMT_IMM8},
+    {"JROB",   0xC, 0x7, FMT_IMM8},
+    {"JUMRF",  0xC, 0x8, FMT_RD},
+    {"JUMRB",  0xC, 0x9, FMT_RD},
+    {"EXPC",   0xC, 0xA, FMT_RD},
+    {"SYSCALL",0xD, 0x0, FMT_SYSCALL},
+    {"RETI",   0xE, 0x0, FMT_NONE},
+    {"HLT",    0xF, 0x0, FMT_NONE},
+};
+
+int instruction_count = sizeof(instructions) / sizeof(instructions[0]);
+
 // 宏定义结构体
 typedef struct {
     char name[MAX_NAME];               // 宏名，如 "INC"
@@ -63,6 +120,21 @@ int   pass1(FILE *in);
 int   is_label(const char *line);
 int   instruction_size(const char *line);
 char  *extract_label(const char *line);
+void  error_msg(const char *filename, int line_num, const char *source,
+               int col, int len, int level, const char *fmt, ...);
+Instruction *find_instruction(const char *mnemonic);
+void  parse_operands(const char *s, const char *source,
+                    char args[MAX_PARAMS][MAX_NAME], int cols[MAX_PARAMS],
+                    int *count);
+int   parse_register(const char *s, const char *filename, int line_num,
+                   const char *source, int col);
+int   parse_immediate(const char *s, const char *filename, int line_num,
+                    const char *source, int col);
+const char *resolve_loop_jump(const char *mnemonic, const char *operand,
+                              int current_addr);
+uint16_t encode(Instruction *inst, const char *operands,
+                const char *filename, int line_num, const char *source);
+int   pass2(FILE *in, FILE *out, const char *filename);
 
 //=========================== 全局变量 ===========================
 
@@ -221,14 +293,31 @@ int main (int argc, char *argv[])
         fclose(input_file);
         return 1;
     }
+
     // 运行预处理器
     preprocess(input_file, tmp);
+
     // 运行第一遍扫描
     rewind(tmp);
     pass1(tmp);
+
+    // 运行第二遍扫描
+    rewind(tmp);
+    FILE *out = fopen(output, "w");
+    if (!out) {
+        fprintf(stderr, RED"Error:"RESET" Cannot create %s\n", output);
+        fclose(tmp);
+        fclose(input_file);
+        return 1;
+    }
+    pass2(tmp, out, input);
+    fclose(out);
+    
     // 关闭输入文件和临时文件
     fclose(input_file);
     fclose(tmp);
+    
+    return 0;
 }
 
 void preprocess(FILE *in, FILE *out)
@@ -754,4 +843,320 @@ void error_msg(const char *filename, int line_num, const char *source,
     if (level == LEVEL_ERROR) {
         exit(1);
     }
+}
+
+// 查找指令
+Instruction *find_instruction(const char *mnemonic) {
+    for (int i = 0; i < instruction_count; i++) {
+        if (strcmp(instructions[i].mnemonic, mnemonic) == 0)
+            return &instructions[i];
+    }
+    return NULL;
+}
+
+// 解析操作数
+void parse_operands(const char *s, const char *source,
+                    char args[MAX_PARAMS][MAX_NAME], int cols[MAX_PARAMS],
+                    int *count)
+{
+    *count = 0;
+    const char *p = s;
+    
+    while (*p && *count < MAX_PARAMS) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0') break;
+        
+        cols[*count] = p - source;
+        
+        int j = 0;
+        while (*p && *p != ',' && j < MAX_NAME-1) {
+            args[*count][j++] = *p++;
+        }
+        args[*count][j] = '\0';
+        
+        while (j > 0 && args[*count][j-1] == ' ') {
+            args[*count][--j] = '\0';
+        }
+        
+        (*count)++;
+        if (*p == ',') p++;
+    }
+}
+
+// 解析寄存器名
+int parse_register(const char *s, const char *filename, int line_num,
+                   const char *source, int col)
+{
+    if ((s[0] == 'R' || s[0] == 'r') && s[1] >= '0' && s[1] <= '3' && s[2] == '\0') {
+        return s[1] - '0';
+    }
+    
+    error_msg(filename, line_num, source, col, strlen(s), LEVEL_ERROR,
+              "The name \"%s\" is not a valid register name.", s);
+    return -1;
+}
+
+// 解析立即数
+int parse_immediate(const char *s, const char *filename, int line_num,
+                    const char *source, int col)
+{
+    char *end;
+    long value;
+    
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        value = strtol(s, &end, 16);
+    } else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) {
+        value = strtol(s + 2, &end, 2);
+    } else {
+        value = strtol(s, &end, 10);
+    }
+    
+    if (*end != '\0') {
+        error_msg(filename, line_num, source, col, strlen(s), LEVEL_ERROR,
+                  "The name \"%s\" is not a valid immediate value.", s);
+        return -1;
+    }
+    
+    return (int)value;
+}
+
+// 检查是否是 loop 形式的跳转
+// 返回新的助记符，如果不需要转换返回原助记符
+// 如果标签未定义返回 NULL
+const char *resolve_loop_jump(const char *mnemonic, const char *operand,
+                              int current_addr)
+{
+    static const struct {
+        const char *loop_form;
+        const char *forward;
+        const char *backward;
+    } loop_jumps[] = {
+        {"JUMP", "JUMPF", "JUMPB"},
+        {"JC",   "JCF",   "JCB"},
+        {"JE",   "JEF",   "JEB"},
+        {"JRO",  "JROF",  "JROB"},
+    };
+    
+    for (int i = 0; i < 4; i++) {
+        if (strcmp(mnemonic, loop_jumps[i].loop_form) == 0) {
+            int target = find_label(operand);
+            if (target < 0) return NULL;
+            
+            if (target >= current_addr) {
+                return loop_jumps[i].forward;
+            } else {
+                return loop_jumps[i].backward;
+            }
+        }
+    }
+    
+    return mnemonic;
+}
+
+uint16_t encode(Instruction *inst, const char *operands,
+                const char *filename, int line_num, const char *source)
+{
+    uint16_t code = inst->opcode << 12;
+    char args[MAX_PARAMS][MAX_NAME];
+    int cols[MAX_PARAMS];
+    int arg_count = 0;
+    
+    parse_operands(operands, source, args, cols, &arg_count);
+    
+    switch (inst->format) {
+        case FMT_NONE:
+            code |= inst->ext;
+            if (strcmp(inst->mnemonic, "HLT") == 0) {
+                code |= 0x0FFF;
+            }
+            break;
+            
+        case FMT_RD:
+            {
+                int rs = parse_register(args[0], filename, line_num, source, cols[0]);
+                int rd = parse_register(args[1], filename, line_num, source, cols[1]);
+                code |= (rs << 10);
+                code |= (rd << 6);
+                code |= inst->ext;
+            }
+            break;
+            
+        case FMT_RR:
+            {
+                int rs0 = parse_register(args[0], filename, line_num, source, cols[0]);
+                int rs1 = parse_register(args[1], filename, line_num, source, cols[1]);
+                int rd  = parse_register(args[2], filename, line_num, source, cols[2]);
+                code |= (rs0 << 10);
+                code |= (rs1 << 8);
+                code |= (rd << 6);
+                code |= inst->ext;
+            }
+            break;
+            
+        case FMT_RRI:
+            {
+                int rs0 = parse_register(args[0], filename, line_num, source, cols[0]);
+                int imm = parse_immediate(args[1], filename, line_num, source, cols[1]);
+                int rd  = parse_register(args[2], filename, line_num, source, cols[2]);
+                
+                if (imm < 0 || imm > 255) {
+                    error_msg(filename, line_num, source, cols[1], strlen(args[1]),
+                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                }
+                
+                code |= (rs0 << 10);
+                code |= ((imm >> 6) & 0x3) << 8;
+                code |= (rd << 6);
+                code |= ((imm >> 4) & 0x3) << 4;
+                code |= (imm & 0xF);
+            }
+            break;
+            
+        case FMT_IMM8:
+            {
+                int imm;
+                if (arg_count == 1 && isalpha((unsigned char)args[0][0])) {
+                    int target = find_label(args[0]);
+                    if (target < 0) {
+                        error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                                  LEVEL_ERROR, "Undefined label: %s", args[0]);
+                    }
+                    imm = target - line_num;
+                } else {
+                    imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+                }
+                
+                if (imm < 0 || imm > 255) {
+                    error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                }
+                
+                code |= ((imm >> 6) & 0x3) << 10;
+                code |= ((imm >> 4) & 0x3) << 8;
+                code |= ((imm >> 2) & 0x3) << 6;
+                code |= (imm & 0x3) << 4;
+                code |= inst->ext;
+            }
+            break;
+            
+        case FMT_STORE:
+            {
+                // 汇编顺序：STORE Rs_1, Rs_0, imm8
+                // 硬件顺序：[11:10]=Rs_0, [9:8]=Rs_1
+                int rs1 = parse_register(args[0], filename, line_num, source, cols[0]);
+                int rs0 = parse_register(args[1], filename, line_num, source, cols[1]);
+                int imm = parse_immediate(args[2], filename, line_num, source, cols[2]);
+                code |= (rs0 << 10);
+                code |= (rs1 << 8);
+                code |= ((imm >> 2) & 0x3) << 6;
+                code |= (imm & 0x3) << 4;
+            }
+            break;
+            
+        case FMT_CALL:
+            {
+                int rd = parse_register(args[1], filename, line_num, source, cols[1]);
+                int imm;
+                if (isalpha((unsigned char)args[0][0])) {
+                    int target = find_label(args[0]);
+                    if (target < 0) {
+                        error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                                  LEVEL_ERROR, "Undefined label: %s", args[0]);
+                    }
+                    imm = target - line_num;
+                } else {
+                    imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+                }
+                
+                code |= ((imm >> 6) & 0x3) << 8;
+                code |= (rd << 6);
+                code |= ((imm >> 4) & 0x3) << 4;
+                code |= (imm & 0xF);
+            }
+            break;
+            
+        case FMT_SYSCALL:
+            {
+                int imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+                code |= ((imm >> 6) & 0x3) << 10;
+                code |= ((imm >> 4) & 0x3) << 8;
+                code |= ((imm >> 2) & 0x3) << 6;
+                code |= (imm & 0x3) << 4;
+            }
+            break;
+    }
+    
+    return code;
+}
+
+int pass2(FILE *in, FILE *out, const char *filename)
+{
+    int addr = 0;
+    char line[MAX_LINE];
+    int line_num = 0;
+    
+    while (fgets(line, sizeof(line), in)) {
+        line_num++;
+        
+        // 保存原始行（用于报错）
+        char original[MAX_LINE];
+        strcpy(original, line);
+        original[strcspn(original, "\r\n")] = '\0';
+        
+        // 去掉行尾换行
+        line[strcspn(line, "\r\n")] = '\0';
+        
+        // 去掉注释
+        char *comment = strchr(line, '#');
+        if (comment) *comment = '\0';
+        
+        // 去掉首尾空格
+        char *trimmed = trim(line);
+        if (trimmed[0] == '\0') continue;
+        
+        // 跳过标签
+        if (is_label(trimmed)) {
+            char *rest = strchr(trimmed, ':') + 1;
+            rest = trim(rest);
+            if (rest[0] == '\0') continue;
+            trimmed = rest;
+        }
+        
+        // 提取助记符
+        char mnemonic[MAX_NAME];
+        int i = 0;
+        while (trimmed[i] && trimmed[i] != ' ' && trimmed[i] != '\t' && i < MAX_NAME-1) {
+            mnemonic[i] = trimmed[i];
+            i++;
+        }
+        mnemonic[i] = '\0';
+        
+        // 提取操作数
+        const char *operands = trimmed + i;
+        while (*operands == ' ' || *operands == '\t') operands++;
+        
+        // 检查 loop 形式
+        const char *resolved = resolve_loop_jump(mnemonic, operands, addr);
+        if (resolved == NULL) {
+            error_msg(filename, line_num, original, 0, strlen(mnemonic),
+                      LEVEL_ERROR, "Undefined label: %s", operands);
+        }
+        
+        // 查找指令
+        Instruction *inst = find_instruction(resolved);
+        if (!inst) {
+            error_msg(filename, line_num, original, 0, strlen(mnemonic),
+                      LEVEL_ERROR, "Unknown instruction: %s", mnemonic);
+        }
+        
+        // 编码
+        uint16_t code = encode(inst, operands, filename, line_num, original);
+        
+        // 写入输出
+        fwrite(&code, sizeof(uint16_t), 1, out);
+        
+        addr++;
+    }
+    
+    return addr;
 }
