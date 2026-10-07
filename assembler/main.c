@@ -138,6 +138,7 @@ const char *resolve_loop_jump(const char *mnemonic, const char *operand,
 uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 const char *filename, int line_num, const char *source);
 int   pass2(FILE *in, FILE *out, const char *filename);
+int is_backward_jump(const char *mnemonic);
 
 //=========================== 全局变量 ===========================
 
@@ -1036,31 +1037,36 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
             break;
             
         case FMT_IMM8:
-            {
-                int imm;
-                if (isalpha((unsigned char)args[0][0])) {
-                    int target = find_label(args[0]);
-                    if (target < 0) {
-                        error_msg(filename, line_num, source, cols[0], strlen(args[0]),
-                                  LEVEL_ERROR, "Undefined label: %s", args[0]);
-                    }
-                    imm = target - addr;
-                } else {
-                    imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
-                }
-                
-                if (imm < 0 || imm > 255) {
+        {
+            int imm;
+            if (isalpha((unsigned char)args[0][0])) {
+                int target = find_label(args[0]);
+                if (target < 0) {
                     error_msg(filename, line_num, source, cols[0], strlen(args[0]),
-                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                            LEVEL_ERROR, "Undefined label: %s", args[0]);
                 }
                 
-                code |= ((imm >> 6) & 0x3) << 10;
-                code |= ((imm >> 4) & 0x3) << 8;
-                code |= ((imm >> 2) & 0x3) << 6;
-                code |= (imm & 0x3) << 4;
-                code |= inst->ext;
+                if (is_backward_jump(inst->mnemonic)) {
+                    imm = addr - target;  // 向后跳转
+                } else {
+                    imm = target - addr;  // 向前跳转
+                }
+            } else {
+                imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
             }
-            break;
+            
+            if (imm < 0 || imm > 255) {
+                error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                        LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+            }
+            
+            code |= ((imm >> 6) & 0x3) << 10;
+            code |= ((imm >> 4) & 0x3) << 8;
+            code |= ((imm >> 2) & 0x3) << 6;
+            code |= (imm & 0x3) << 4;
+            code |= inst->ext;
+        }
+        break;
             
         case FMT_STORE:
             {
@@ -1084,31 +1090,36 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
             break;
             
         case FMT_CALL:
-            {
-                int rd = parse_register(args[1], filename, line_num, source, cols[1]);
-                int imm;
-                if (isalpha((unsigned char)args[0][0])) {
-                    int target = find_label(args[0]);
-                    if (target < 0) {
-                        error_msg(filename, line_num, source, cols[0], strlen(args[0]),
-                                  LEVEL_ERROR, "Undefined label: %s", args[0]);
-                    }
-                    imm = target - addr;
-                } else {
-                    imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
-                }
-                
-                if (imm < 0 || imm > 255) {
+        {
+            int rd = parse_register(args[1], filename, line_num, source, cols[1]);
+            int imm;
+            if (isalpha((unsigned char)args[0][0])) {
+                int target = find_label(args[0]);
+                if (target < 0) {
                     error_msg(filename, line_num, source, cols[0], strlen(args[0]),
-                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                            LEVEL_ERROR, "Undefined label: %s", args[0]);
                 }
                 
-                code |= ((imm >> 6) & 0x3) << 8;
-                code |= (rd << 6);
-                code |= ((imm >> 4) & 0x3) << 4;
-                code |= (imm & 0xF);
+                if (strcmp(inst->mnemonic, "CALLB") == 0) {
+                    imm = addr - target;  // 向后
+                } else {
+                    imm = target - addr;  // 向前
+                }
+            } else {
+                imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
             }
-            break;
+            
+            if (imm < 0 || imm > 255) {
+                error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                        LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+            }
+            
+            code |= ((imm >> 6) & 0x3) << 8;
+            code |= (rd << 6);
+            code |= ((imm >> 4) & 0x3) << 4;
+            code |= (imm & 0xF);
+        }
+        break;
             
         case FMT_SYSCALL:
             {
@@ -1201,4 +1212,12 @@ int pass2(FILE *in, FILE *out, const char *filename)
     }
     
     return addr;
+}
+
+// 判断是否是向后跳转指令
+int is_backward_jump(const char *mnemonic) {
+    return strcmp(mnemonic, "JUMPB") == 0 ||
+           strcmp(mnemonic, "JCB")   == 0 ||
+           strcmp(mnemonic, "JEB")   == 0 ||
+           strcmp(mnemonic, "JROB")  == 0;
 }
