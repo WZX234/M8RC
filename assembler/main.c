@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdlib.h>
+#include <stdarg.h>
 
 // ANSI color codes
 #define RED      "\033[91m"
@@ -79,6 +81,9 @@ int include_count = 0;
 //=========================== 日志级别 ===========================
 const char *level_names[] = {"Error", "Warning", "Notice"};
 const char *level_colors[] = {RED, YELLOW, CYAN};
+
+// 当前源文件名（用于报错）
+char *source_filename = NULL;
 
 //=========================== 命令行参数 ===========================
 char *input = NULL;     // 输入文件名
