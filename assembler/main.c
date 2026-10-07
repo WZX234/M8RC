@@ -287,7 +287,7 @@ int main (int argc, char *argv[])
     }
 
     // 创建临时文件
-    FILE *tmp = fopen("tmp.asm", "w");
+    FILE *tmp = fopen("tmp.asm", "w+");
     if (!tmp) {
         fprintf(stderr, RED"Error:"RESET" Cannot create tmp.asm\n");
         fclose(input_file);
