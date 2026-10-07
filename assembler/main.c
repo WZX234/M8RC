@@ -14,10 +14,10 @@
 // information
 #define VERSION "0.0.1"
 
-#define MAX_MACROS 256  // 最大宏定义数量
-#define MAX_PARAMS 8    // 最大宏参数数量
-#define MAX_NAME   64   // 最大宏名长度
-#define MAX_VALUE  512  // 最大宏值长度
+#define MAX_MACROS   256  // 最大宏定义数量
+#define MAX_PARAMS   8    // 最大宏参数数量
+#define MAX_NAME     64   // 最大宏名长度
+#define MAX_VALUE    512  // 最大宏值长度
 #define MAX_INCLUDES 32 // 最大包含文件数量
 
 #define MAX_LINE_LENGTH 256 // 每行的最大长度
@@ -37,7 +37,8 @@ Macro *find_macro(const char *name);
 void replace_word(char *result, const char *word, const char *replacement);
 int expand_line(const char *line, FILE *out);
 int handle_include(const char *line, FILE *out, int depth);
-
+int expand_param_macro(const char *line, Macro *m, FILE *out);
+int replace_all_macros(char *line);
 
 Macro macros[MAX_MACROS];
 int macro_count = 0;
@@ -212,8 +213,10 @@ void preprocess(FILE *in, FILE *out)
             }
         }
         // 处理宏展开
-        if (!expand_line(trimmed, out)) {
-            // 不是宏，原样写入 out
+        // 宏展开
+        int r = expand_line(trimmed, out);
+        if (r < 0) {
+            // 不是宏，原样输出
             fputs(trimmed, out);
             fputc('\n', out);
         }
@@ -264,7 +267,8 @@ void handle_define(const char *line)
     macro_count++;
 }
 
-int handle_include(const char *line, FILE *out, int depth) {
+int handle_include(const char *line, FILE *out, int depth)
+{
     // 1. 深度检查
     if (depth > 16) {
         fprintf(stderr, RED"Error:"RESET" Include depth exceeded\n");
@@ -278,7 +282,7 @@ int handle_include(const char *line, FILE *out, int depth) {
         return 0;
     }
     
-    // 3. 循环包含检查
+    // 3. 循环包含检查（只检查当前递归路径）
     for (int i = 0; i < include_count; i++) {
         if (strcmp(included_files[i], filename) == 0) {
             fprintf(stderr, RED"Error:"RESET" Circular include: %s\n", filename);
@@ -286,14 +290,13 @@ int handle_include(const char *line, FILE *out, int depth) {
         }
     }
     
-    // 4. 记录已包含文件
-    if (include_count < MAX_INCLUDES) {
-        strcpy(included_files[include_count], filename);
-        include_count++;
-    } else {
+    // 4. 记录已包含文件（压栈）
+    if (include_count >= MAX_INCLUDES) {
         fprintf(stderr, RED"Error:"RESET" Too many includes\n");
         return 0;
     }
+    strcpy(included_files[include_count], filename);
+    include_count++;
     
     // 5. 打开文件
     FILE *inc = fopen(filename, "r");
@@ -341,7 +344,6 @@ int handle_include(const char *line, FILE *out, int depth) {
         // 宏展开
         int r = expand_line(trimmed, out);
         if (r < 0) {
-            // 不是宏，原样输出
             fputs(trimmed, out);
             fputc('\n', out);
         }
@@ -349,68 +351,68 @@ int handle_include(const char *line, FILE *out, int depth) {
     
     fclose(inc);
     
-    // 7. 处理完毕，从列表中移除
+    // 7. 弹栈
     include_count--;
     
     return 1;
 }
-
-// 展开宏，如果是宏则返回 1，否则返回 0
-int expand_line(const char *line, FILE *out)
-{
-    // 提取第一个词（宏名）
-    char name[MAX_NAME];
+// 展开一行
+// 返回值：
+//   >= 0：是宏，返回写入的行数
+//   -1：不是宏，未写入
+int expand_line(const char *line, FILE *out) {
+    // 提取第一个词
+    char first[MAX_NAME];
     int i = 0;
     while (line[i] && line[i] != ' ' && line[i] != '\t' && i < MAX_NAME-1) {
-        name[i] = line[i];
+        first[i] = line[i];
         i++;
     }
-    name[i] = '\0';
+    first[i] = '\0';
     
     // 查找宏
-    Macro *m = find_macro(name);
-    if (!m) return 0;  // 不是宏
+    Macro *m = find_macro(first);
     
-    // 跳过宏名和空白
-    const char *p = line + i;
-    while (*p == ' ' || *p == '\t') p++;
-    
-    // 解析参数
-    char args[MAX_PARAMS][MAX_NAME];
-    int arg_count = 0;
-    while (*p && arg_count < MAX_PARAMS) {
-        int j = 0;
-        while (*p && *p != ',' && j < MAX_NAME-1) {
-            args[arg_count][j++] = *p++;
-        }
-        args[arg_count][j] = '\0';
-        while (j > 0 && args[arg_count][j-1] == ' ') {
-            args[arg_count][--j] = '\0';
-        }
-        arg_count++;
-        if (*p == ',') p++;
+    // 第一步：行首是带参宏？
+    if (m && m->param_count > 0) {
+        return expand_param_macro(line, m, out);
     }
     
-    // 按 ; 切分宏值，逐条展开
-    char value_copy[MAX_VALUE];
-    strcpy(value_copy, m->value);
-    
-    char *segment = strtok(value_copy, ";");
-    while (segment) {
-        char *trimmed_seg = trim(segment);
-        if (trimmed_seg[0] != '\0') {
-            char expanded[MAX_VALUE];
-            strcpy(expanded, trimmed_seg);
-            for (int k = 0; k < m->param_count && k < arg_count; k++) {
-                replace_word(expanded, m->params[k], args[k]);
-            }
-            fputs(expanded, out);
-            fputc('\n', out);
+    // 第二步：行首是无参宏？
+    if (m && m->param_count == 0) {
+        char result[MAX_VALUE];
+        strcpy(result, line);
+        
+        int total = 0;
+        for (int pass = 0; pass < 32; pass++) {
+            int changed = replace_all_macros(result);
+            if (changed == 0) break;
+            total += changed;
         }
-        segment = strtok(NULL, ";");
+        
+        fputs(result, out);
+        fputc('\n', out);
+        return 1;
     }
-    
-    return 1;
+
+    // 第三步：行首不是宏，但行内可能有宏
+    char result[MAX_VALUE];
+    strcpy(result, line);
+
+    int total = 0;
+    for (int pass = 0; pass < 32; pass++) {
+        int changed = replace_all_macros(result);
+        if (changed == 0) break;
+        total += changed;
+    }
+
+    if (total > 0) {
+        fputs(result, out);
+        fputc('\n', out);
+        return 1;
+    }
+
+    return -1;
 }
 
 // 替换宏参数
@@ -421,8 +423,8 @@ void replace_word(char *result, const char *word, const char *replacement) {
     
     while (*p) {
         if (strncmp(p, word, strlen(word)) == 0) {
-            int before_ok = (p == result || !isalnum(*(p-1)));
-            int after_ok = !isalnum(*(p + strlen(word)));
+            int before_ok = (p == result || !isalnum((unsigned char)*(p-1)));
+            int after_ok = !isalnum((unsigned char)*(p + strlen(word)));
             if (before_ok && after_ok) {
                 strcpy(out, replacement);
                 out += strlen(replacement);
@@ -461,4 +463,106 @@ char *trim(char *s) {
     }
     
     return s;
+}
+
+// 展开带参宏
+// line: "LEF R0"
+// m: 宏定义
+// out: 输出文件
+// 返回：写入的行数
+int expand_param_macro(const char *line, Macro *m, FILE *out) {
+    // 跳过宏名
+    const char *p = line;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    while (*p == ' ' || *p == '\t') p++;
+    
+    // 解析参数
+    char args[MAX_PARAMS][MAX_NAME];
+    int arg_count = 0;
+    while (*p && arg_count < MAX_PARAMS) {
+        int j = 0;
+        while (*p && *p != ',' && j < MAX_NAME-1) {
+            args[arg_count][j++] = *p++;
+        }
+        args[arg_count][j] = '\0';
+        // 去掉尾部空格
+        while (j > 0 && args[arg_count][j-1] == ' ') {
+            args[arg_count][--j] = '\0';
+        }
+        arg_count++;
+        if (*p == ',') p++;
+    }
+    
+    // 按 ; 切分宏值，逐条展开
+    char value_copy[MAX_VALUE];
+    strcpy(value_copy, m->value);
+    
+    int written = 0;
+    char *segment = strtok(value_copy, ";");
+    while (segment) {
+        char *trimmed_seg = trim(segment);
+        if (trimmed_seg[0] != '\0') {
+            char expanded[MAX_VALUE];
+            strcpy(expanded, trimmed_seg);
+            
+            // 替换参数
+            for (int k = 0; k < m->param_count && k < arg_count; k++) {
+                replace_word(expanded, m->params[k], args[k]);
+            }
+            
+            // 替换无参宏（参数值里可能含宏）
+            for (int pass = 0; pass < 32; pass++) {
+                if (replace_all_macros(expanded) == 0) break;
+            }
+            
+            fputs(expanded, out);
+            fputc('\n', out);
+            written++;
+        }
+        segment = strtok(NULL, ";");
+    }
+    
+    return written;
+}
+
+// 替换一行中所有无参宏，返回替换次数
+int replace_all_macros(char *line) {
+    char temp[MAX_VALUE];
+    strcpy(temp, line);
+    
+    char *p = temp;
+    char *outp = line;
+    int changed = 0;
+    
+    while (*p) {
+        // 检查是否是标识符开头
+        if (isalpha((unsigned char)*p) || *p == '_') {
+            char ident[MAX_NAME];
+            int i = 0;
+            char *start = p;
+            
+            // 提取标识符
+            while ((isalnum((unsigned char)(unsigned char)*p) || *p == '_') && i < MAX_NAME-1) {
+                ident[i++] = *p++;
+            }
+            ident[i] = '\0';
+            
+            // 查宏表
+            Macro *m = find_macro(ident);
+            if (m && m->param_count == 0) {
+                // 无参宏，替换
+                strcpy(outp, m->value);
+                outp += strlen(m->value);
+                changed++;
+            } else {
+                // 不是宏，原样拷贝
+                while (start < p) *outp++ = *start++;
+            }
+        } else {
+            *outp++ = *p++;
+        }
+    }
+    *outp = '\0';
+    
+    return changed;
 }
