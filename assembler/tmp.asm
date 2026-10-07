@@ -1,4 +1,7 @@
-ADD R0, R0, R0
-NOP
-SUBI R1, 1, R1
-ANDI R1, 0b11111111, R1
+loop2:
+CMPI R0, 8
+JE loop1
+ADDI R0, 1, R0
+JUMP loop2
+loop1:
+STORE R0, R1, 0
