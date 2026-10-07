@@ -45,48 +45,51 @@
 #define FMT_CALL    6
 #define FMT_SYSCALL 7
 
+// 指令结构体
 typedef struct {
-    const char *mnemonic;
-    uint16_t opcode;
-    uint16_t ext;
-    int format;
+    const char *mnemonic;  // 指令助记符，如 "ADDI"
+    uint16_t opcode;       // 操作码，如 0x1
+    uint16_t ext;          // 扩展码，如 0x0
+    int format;            // 指令格式，如 FMT_RRI
+    int arg_count;         // 操作数个数
 } Instruction;
 
+//=========================== 指令表 ===========================
 Instruction instructions[] = {
-    {"NOP",    0x0, 0x0, FMT_NONE},
-    {"ADDI",   0x1, 0x0, FMT_RRI},
-    {"SUBI",   0x2, 0x0, FMT_RRI},
-    {"ANDI",   0x3, 0x0, FMT_RRI},
-    {"ORI",    0x4, 0x0, FMT_RRI},
-    {"XORI",   0x5, 0x0, FMT_RRI},
-    {"CMPI",   0x6, 0x0, FMT_RRI},
-    {"LOAD",   0x7, 0x0, FMT_RRI},
-    {"STORE",  0x8, 0x0, FMT_STORE},
-    {"CALLF",  0x9, 0x0, FMT_CALL},
-    {"CALLB",  0xA, 0x0, FMT_CALL},
-    {"ADD",    0xB, 0x0, FMT_RR},
-    {"ADC",    0xB, 0x1, FMT_RR},
-    {"SUB",    0xB, 0x2, FMT_RR},
-    {"SBC",    0xB, 0x3, FMT_RR},
-    {"AND",    0xB, 0x4, FMT_RR},
-    {"OR",     0xB, 0x5, FMT_RR},
-    {"XOR",    0xB, 0x6, FMT_RR},
-    {"RIGHT",  0xB, 0x7, FMT_RD},
-    {"CMP",    0xB, 0x8, FMT_RR},
-    {"JUMPF",  0xC, 0x0, FMT_IMM8},
-    {"JUMPB",  0xC, 0x1, FMT_IMM8},
-    {"JCF",    0xC, 0x2, FMT_IMM8},
-    {"JCB",    0xC, 0x3, FMT_IMM8},
-    {"JEF",    0xC, 0x4, FMT_IMM8},
-    {"JEB",    0xC, 0x5, FMT_IMM8},
-    {"JROF",   0xC, 0x6, FMT_IMM8},
-    {"JROB",   0xC, 0x7, FMT_IMM8},
-    {"JUMRF",  0xC, 0x8, FMT_RD},
-    {"JUMRB",  0xC, 0x9, FMT_RD},
-    {"EXPC",   0xC, 0xA, FMT_RD},
-    {"SYSCALL",0xD, 0x0, FMT_SYSCALL},
-    {"RETI",   0xE, 0x0, FMT_NONE},
-    {"HLT",    0xF, 0x0, FMT_NONE},
+    {"NOP",    0x0, 0x0, FMT_NONE,    0},
+    {"ADDI",   0x1, 0x0, FMT_RRI,     3},
+    {"SUBI",   0x2, 0x0, FMT_RRI,     3},
+    {"ANDI",   0x3, 0x0, FMT_RRI,     3},
+    {"ORI",    0x4, 0x0, FMT_RRI,     3},
+    {"XORI",   0x5, 0x0, FMT_RRI,     3},
+    {"CMPI",   0x6, 0x0, FMT_RRI,     2},
+    {"LOAD",   0x7, 0x0, FMT_RRI,     3},
+    {"STORE",  0x8, 0x0, FMT_STORE,   3},
+    {"CALLF",  0x9, 0x0, FMT_CALL,    2},
+    {"CALLB",  0xA, 0x0, FMT_CALL,    2},
+    {"ADD",    0xB, 0x0, FMT_RR,      3},
+    {"ADC",    0xB, 0x1, FMT_RR,      3},
+    {"SUB",    0xB, 0x2, FMT_RR,      3},
+    {"SBC",    0xB, 0x3, FMT_RR,      3},
+    {"AND",    0xB, 0x4, FMT_RR,      3},
+    {"OR",     0xB, 0x5, FMT_RR,      3},
+    {"XOR",    0xB, 0x6, FMT_RR,      3},
+    {"RIGHT",  0xB, 0x7, FMT_RD,      2},
+    {"CMP",    0xB, 0x8, FMT_RR,      2},
+    {"JUMPF",  0xC, 0x0, FMT_IMM8,    1},
+    {"JUMPB",  0xC, 0x1, FMT_IMM8,    1},
+    {"JCF",    0xC, 0x2, FMT_IMM8,    1},
+    {"JCB",    0xC, 0x3, FMT_IMM8,    1},
+    {"JEF",    0xC, 0x4, FMT_IMM8,    1},
+    {"JEB",    0xC, 0x5, FMT_IMM8,    1},
+    {"JROF",   0xC, 0x6, FMT_IMM8,    1},
+    {"JROB",   0xC, 0x7, FMT_IMM8,    1},
+    {"JUMRF",  0xC, 0x8, FMT_RD,      1},
+    {"JUMRB",  0xC, 0x9, FMT_RD,      1},
+    {"EXPC",   0xC, 0xA, FMT_RD,      2},
+    {"SYSCALL",0xD, 0x0, FMT_SYSCALL, 1},
+    {"RETI",   0xE, 0x0, FMT_NONE,    0},
+    {"HLT",    0xF, 0x0, FMT_NONE,    0},
 };
 
 int instruction_count = sizeof(instructions) / sizeof(instructions[0]);
@@ -123,7 +126,7 @@ char  *extract_label(const char *line);
 void  error_msg(const char *filename, int line_num, const char *source,
                int col, int len, int level, const char *fmt, ...);
 Instruction *find_instruction(const char *mnemonic);
-void  parse_operands(const char *s, const char *source,
+void parse_operands(const char *s, int base, const char *source,
                     char args[MAX_PARAMS][MAX_NAME], int cols[MAX_PARAMS],
                     int *count);
 int   parse_register(const char *s, const char *filename, int line_num,
@@ -132,7 +135,7 @@ int   parse_immediate(const char *s, const char *filename, int line_num,
                     const char *source, int col);
 const char *resolve_loop_jump(const char *mnemonic, const char *operand,
                               int current_addr);
-uint16_t encode(Instruction *inst, const char *operands,
+uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 const char *filename, int line_num, const char *source);
 int   pass2(FILE *in, FILE *out, const char *filename);
 
@@ -855,7 +858,13 @@ Instruction *find_instruction(const char *mnemonic) {
 }
 
 // 解析操作数
-void parse_operands(const char *s, const char *source,
+// s: 操作数字符串
+// base: 操作数字符串在原始行里的起始偏移
+// source: 原始行
+// args: 输出的参数数组
+// cols: 输出的列号数组（相对于原始行）
+// count: 输出的参数个数
+void parse_operands(const char *s, int base, const char *source,
                     char args[MAX_PARAMS][MAX_NAME], int cols[MAX_PARAMS],
                     int *count)
 {
@@ -866,7 +875,7 @@ void parse_operands(const char *s, const char *source,
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '\0') break;
         
-        cols[*count] = p - source;
+        cols[*count] = base + (p - s);
         
         int j = 0;
         while (*p && *p != ',' && j < MAX_NAME-1) {
@@ -953,7 +962,7 @@ const char *resolve_loop_jump(const char *mnemonic, const char *operand,
     return mnemonic;
 }
 
-uint16_t encode(Instruction *inst, const char *operands,
+uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 const char *filename, int line_num, const char *source)
 {
     uint16_t code = inst->opcode << 12;
@@ -961,7 +970,7 @@ uint16_t encode(Instruction *inst, const char *operands,
     int cols[MAX_PARAMS];
     int arg_count = 0;
     
-    parse_operands(operands, source, args, cols, &arg_count);
+    parse_operands(operands, base, source, args, cols, &arg_count);
     
     switch (inst->format) {
         case FMT_NONE:
@@ -974,9 +983,17 @@ uint16_t encode(Instruction *inst, const char *operands,
         case FMT_RD:
             {
                 int rs = parse_register(args[0], filename, line_num, source, cols[0]);
-                int rd = parse_register(args[1], filename, line_num, source, cols[1]);
-                code |= (rs << 10);
-                code |= (rd << 6);
+                
+                if (strcmp(inst->mnemonic, "JUMRF") == 0 ||
+                    strcmp(inst->mnemonic, "JUMRB") == 0) {
+                    // JUMRF/JUMRB: Rs_0 在 [9:8]
+                    code |= (rs << 8);
+                } else {
+                    // RIGHT/EXPC: Rs_0 在 [11:10], Rd 在 [7:6]
+                    code |= (rs << 10);
+                    int rd = parse_register(args[1], filename, line_num, source, cols[1]);
+                    code |= (rd << 6);
+                }
                 code |= inst->ext;
             }
             break;
@@ -985,10 +1002,12 @@ uint16_t encode(Instruction *inst, const char *operands,
             {
                 int rs0 = parse_register(args[0], filename, line_num, source, cols[0]);
                 int rs1 = parse_register(args[1], filename, line_num, source, cols[1]);
-                int rd  = parse_register(args[2], filename, line_num, source, cols[2]);
                 code |= (rs0 << 10);
                 code |= (rs1 << 8);
-                code |= (rd << 6);
+                if (inst->arg_count == 3) {
+                    int rd = parse_register(args[2], filename, line_num, source, cols[2]);
+                    code |= (rd << 6);
+                }
                 code |= inst->ext;
             }
             break;
@@ -997,7 +1016,6 @@ uint16_t encode(Instruction *inst, const char *operands,
             {
                 int rs0 = parse_register(args[0], filename, line_num, source, cols[0]);
                 int imm = parse_immediate(args[1], filename, line_num, source, cols[1]);
-                int rd  = parse_register(args[2], filename, line_num, source, cols[2]);
                 
                 if (imm < 0 || imm > 255) {
                     error_msg(filename, line_num, source, cols[1], strlen(args[1]),
@@ -1006,7 +1024,12 @@ uint16_t encode(Instruction *inst, const char *operands,
                 
                 code |= (rs0 << 10);
                 code |= ((imm >> 6) & 0x3) << 8;
-                code |= (rd << 6);
+                
+                if (inst->arg_count == 3) {
+                    int rd = parse_register(args[2], filename, line_num, source, cols[2]);
+                    code |= (rd << 6);
+                }
+                
                 code |= ((imm >> 4) & 0x3) << 4;
                 code |= (imm & 0xF);
             }
@@ -1015,13 +1038,13 @@ uint16_t encode(Instruction *inst, const char *operands,
         case FMT_IMM8:
             {
                 int imm;
-                if (arg_count == 1 && isalpha((unsigned char)args[0][0])) {
+                if (isalpha((unsigned char)args[0][0])) {
                     int target = find_label(args[0]);
                     if (target < 0) {
                         error_msg(filename, line_num, source, cols[0], strlen(args[0]),
                                   LEVEL_ERROR, "Undefined label: %s", args[0]);
                     }
-                    imm = target - line_num;
+                    imm = target - addr;
                 } else {
                     imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
                 }
@@ -1042,14 +1065,21 @@ uint16_t encode(Instruction *inst, const char *operands,
         case FMT_STORE:
             {
                 // 汇编顺序：STORE Rs_1, Rs_0, imm8
-                // 硬件顺序：[11:10]=Rs_0, [9:8]=Rs_1
+                // 硬件顺序：[11:10]=Rs_0, [9:8]=Rs_1, [7:6]=imm[7:6], [5:4]=imm[5:4], [3:0]=imm[3:0]
                 int rs1 = parse_register(args[0], filename, line_num, source, cols[0]);
                 int rs0 = parse_register(args[1], filename, line_num, source, cols[1]);
                 int imm = parse_immediate(args[2], filename, line_num, source, cols[2]);
+                
+                if (imm < 0 || imm > 255) {
+                    error_msg(filename, line_num, source, cols[2], strlen(args[2]),
+                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                }
+                
                 code |= (rs0 << 10);
                 code |= (rs1 << 8);
-                code |= ((imm >> 2) & 0x3) << 6;
-                code |= (imm & 0x3) << 4;
+                code |= ((imm >> 6) & 0x3) << 6;
+                code |= ((imm >> 4) & 0x3) << 4;
+                code |= (imm & 0xF);
             }
             break;
             
@@ -1063,9 +1093,14 @@ uint16_t encode(Instruction *inst, const char *operands,
                         error_msg(filename, line_num, source, cols[0], strlen(args[0]),
                                   LEVEL_ERROR, "Undefined label: %s", args[0]);
                     }
-                    imm = target - line_num;
+                    imm = target - addr;
                 } else {
                     imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+                }
+                
+                if (imm < 0 || imm > 255) {
+                    error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
                 }
                 
                 code |= ((imm >> 6) & 0x3) << 8;
@@ -1089,6 +1124,7 @@ uint16_t encode(Instruction *inst, const char *operands,
     return code;
 }
 
+// 第二遍扫描：生成机器码
 int pass2(FILE *in, FILE *out, const char *filename)
 {
     int addr = 0;
@@ -1135,6 +1171,9 @@ int pass2(FILE *in, FILE *out, const char *filename)
         const char *operands = trimmed + i;
         while (*operands == ' ' || *operands == '\t') operands++;
         
+        // 计算 base（操作数字符串在原始行里的偏移）
+        int base = operands - original;
+        
         // 检查 loop 形式
         const char *resolved = resolve_loop_jump(mnemonic, operands, addr);
         if (resolved == NULL) {
@@ -1150,10 +1189,13 @@ int pass2(FILE *in, FILE *out, const char *filename)
         }
         
         // 编码
-        uint16_t code = encode(inst, operands, filename, line_num, original);
+        uint16_t code = encode(inst, operands, addr, base, filename, line_num, original);
         
         // 写入输出
-        fwrite(&code, sizeof(uint16_t), 1, out);
+        uint8_t hi = (code >> 8) & 0xFF;
+        uint8_t lo = code & 0xFF;
+        fwrite(&hi, 1, 1, out);
+        fwrite(&lo, 1, 1, out);
         
         addr++;
     }
