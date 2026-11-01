@@ -48,6 +48,9 @@
 #define FMT_CALL    6
 #define FMT_SYSCALL 7
 
+// 达到此数量后停止继续报错
+#define MAX_ERRORS 100
+
 // 指令结构体
 typedef struct {
     const char *mnemonic;  // 指令助记符，如 "ADDI"
@@ -121,7 +124,7 @@ void  replace_word(char *result, const char *word, const char *replacement);
 int   expand_line(const char *line, FILE *out, int line_num);
 int   expand_param_macro(const char *line, Macro *m, FILE *out, int line_num);
 int   replace_all_macros(char *line);
-void  add_label(const char *name, int addr);
+int   add_label(const char *name, int addr);
 int   find_label(const char *name);
 int   pass1(FILE *in);
 int   is_label(const char *line);
@@ -139,8 +142,9 @@ int   parse_immediate(const char *s, const char *filename, int line_num,
                     const char *source, int col);
 const char *resolve_loop_jump(const char *mnemonic, const char *operand,
                               int current_addr);
-uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
-                const char *filename, int line_num, const char *source);
+int encode(Instruction *inst, const char *operands, int addr, int base,
+           const char *filename, int line_num, const char *source,
+           uint16_t *code_out);
 int  pass2(FILE *in, FILE *out, const char *filename);
 int  is_backward_jump(const char *mnemonic);
 int  safe_strcpy(char *dest, const char *src, size_t dest_size);
@@ -179,6 +183,17 @@ char tmp_filename[256] = "";
 // 错误标志
 int has_error = 0;
 
+// 分级计数器
+int error_count       = 0;    // Error 计数器
+int warning_count     = 0;    // Warning 计数器
+int notice_count      = 0;    // Notice 计数器
+int werror            = 0;    // -Werror：警告当错误
+int fatal_warnings    = 0;    // --fatal-warnings：有警告则退出非 0
+int show_warnings     = 1;    // -w/--no-warnings 置 0：抑制警告
+int show_notices      = 0;    // -v/--verbose 置 1：显示 Notice
+int max_errors        = 100;  // --max-errors N：全局错误上限
+int max_errors_per_line = 5;  // 同一行最多报多少条 ERROR
+
 //=========================== 日志级别 ===========================
 const char *level_names[] = {"Error", "Warning", "Notice"};
 const char *level_colors[] = {RED, YELLOW, CYAN};
@@ -193,15 +208,15 @@ char *format = "bin";   // 输出格式
 char *listing = NULL;   // 汇编列表文件名
 int quiet = 0;          // 安静模式标志
 
-int main (int argc, char *argv[])
+int main(int argc, char *argv[])
 {
     // 获取当前时间戳
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
 
     // 生成临时文件名
-    snprintf(tmp_filename, sizeof(tmp_filename), 
-             "tmp_%04d%02d%02d_%02d%02d%02d.asm", 
+    snprintf(tmp_filename, sizeof(tmp_filename),
+             "tmp_%04d%02d%02d_%02d%02d%02d.asm",
              t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
              t->tm_hour, t->tm_min, t->tm_sec);
 
@@ -210,109 +225,95 @@ int main (int argc, char *argv[])
 
     //=========================================== 参数解析 =========================================
 
-    for (int i = 1; i < argc; i++)
-    {
-        // 检查是否请求帮助
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
-        {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf(GREEN"Usage:"RESET" %s <input_file>\n", argv[0]);
             puts(GREEN"Description:"RESET" This program is an assembler that converts assembly code into machine code.");
             puts(GREEN"Options:"RESET);
-            puts("  "YELLOW"--help, -h   "RESET" Show this help message and exit");
-            puts("  "YELLOW"--version, -v"RESET" Show the version of the assembler and exit");
-            puts("  "YELLOW"--input, -i  "RESET" Specify the input assembly file (required)");
-            puts("  "YELLOW"--output, -o "RESET" Specify the output file (default: a.out)");
-            puts("  "YELLOW"--format, -f "RESET" Specify the output format (default: bin)");
-            puts("  "YELLOW"--listing, -l"RESET" Specify the listing file (optional)");
-            puts("  "YELLOW"--quiet, -q  "RESET" Enable quiet mode (suppress output messages)");
+            puts("  "YELLOW"--help, -h          "RESET" Show this help message and exit");
+            puts("  "YELLOW"--version, -v       "RESET" Show the version of the assembler and exit");
+            puts("  "YELLOW"--input, -i         "RESET" Specify the input assembly file (required)");
+            puts("  "YELLOW"--output, -o        "RESET" Specify the output file (default: a.out)");
+            puts("  "YELLOW"--format, -f        "RESET" Specify the output format (default: bin)");
+            puts("  "YELLOW"--listing, -l       "RESET" Specify the listing file (optional)");
+            puts("  "YELLOW"--quiet, -q         "RESET" Enable quiet mode (suppress output messages)");
+            puts("  "YELLOW"--verbose           "RESET" Show notice-level messages");
+            puts("  "YELLOW"--no-warnings, -w   "RESET" Suppress warning and notice messages");
+            puts("  "YELLOW"--Werror            "RESET" Treat warnings as errors");
+            puts("  "YELLOW"--fatal-warnings    "RESET" Exit non-zero if any warning is emitted");
+            puts("  "YELLOW"--max-errors N      "RESET" Stop reporting after N errors (default: 100)");
+            puts("  "YELLOW"--max-errors-per-line N"RESET" Max errors per source line (default: 5)");
             return 0;
         }
-        
-        // 检查是否请求版本信息
-        else if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0)
-        {
+        else if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
+            // 注意：-v 是 version，--verbose 才是 verbose；避免歧义
             puts(GREEN"Assembler version: "VERSION RESET);
             puts(GREEN"Copyright (C) 2026 WZX234. All rights reserved."RESET);
             return 0;
         }
-        
-        // 获取输入文件名
-        else if (strcmp(argv[i], "--input") == 0 || strcmp(argv[i], "-i") == 0)
-        {
-            if (i + 1 < argc)
-            {
-                input = argv[++i];
-            }
-            else
-            {
-                fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]);
-                return 1;
-            }
+        else if (strcmp(argv[i], "--input") == 0 || strcmp(argv[i], "-i") == 0) {
+            if (i + 1 < argc) input = argv[++i];
+            else { fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]); return 1; }
         }
-
-        // 检查是否指定输出文件名
-        else if (strcmp(argv[i], "--output") == 0 || strcmp(argv[i], "-o") == 0)
-        {
-            if (i + 1 < argc)
-            {
-                output = argv[++i];
-            }
-            else
-            {
-                fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]);
-                return 1;
-            }
+        else if (strcmp(argv[i], "--output") == 0 || strcmp(argv[i], "-o") == 0) {
+            if (i + 1 < argc) output = argv[++i];
+            else { fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]); return 1; }
         }
-
-        // 检查是否请求输出格式
-        else if (strcmp(argv[i], "--format") == 0 || strcmp(argv[i], "-f") == 0)
-        {
-            if (i + 1 < argc)
-            {
-                format = argv[++i];
-            }
-            else
-            {
-                fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]);
-                return 1;
-            }
+        else if (strcmp(argv[i], "--format") == 0 || strcmp(argv[i], "-f") == 0) {
+            if (i + 1 < argc) format = argv[++i];
+            else { fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]); return 1; }
         }
-
-        // 检查是否请求生成汇编列表文件
-        else if (strcmp(argv[i], "--listing") == 0 || strcmp(argv[i], "-l") == 0)
-        {
-            if (i + 1 < argc)
-            {
-                listing = argv[++i];
-            }
-            else
-            {
-                fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]);
-                return 1;
-            }
+        else if (strcmp(argv[i], "--listing") == 0 || strcmp(argv[i], "-l") == 0) {
+            if (i + 1 < argc) listing = argv[++i];
+            else { fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]); return 1; }
         }
-
-        // 检查是否请求安静模式
-        else if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "-q") == 0)
-        {
+        else if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "-q") == 0) {
             quiet = 1;
         }
-
-        else if (argv[i][0] != '-')
-        {
+        else if (strcmp(argv[i], "--verbose") == 0) {
+            show_notices = 1;
+        }
+        else if (strcmp(argv[i], "--no-warnings") == 0 || strcmp(argv[i], "-w") == 0) {
+            show_warnings = 0;
+            show_notices  = 0;
+        }
+        else if (strcmp(argv[i], "--Werror") == 0) {
+            werror = 1;
+        }
+        else if (strcmp(argv[i], "--fatal-warnings") == 0) {
+            fatal_warnings = 1;
+        }
+        else if (strcmp(argv[i], "--max-errors") == 0) {
+            if (i + 1 < argc) {
+                int v = atoi(argv[++i]);
+                if (v > 0) max_errors = v;
+                else { fprintf(stderr, RED"Error:"RESET" Invalid --max-errors value\n"); return 1; }
+            } else {
+                fprintf(stderr, RED"Error:"RESET" Missing argument for --max-errors\n");
+                return 1;
+            }
+        }
+        else if (strcmp(argv[i], "--max-errors-per-line") == 0) {
+            if (i + 1 < argc) {
+                int v = atoi(argv[++i]);
+                if (v > 0) max_errors_per_line = v;
+                else { fprintf(stderr, RED"Error:"RESET" Invalid --max-errors-per-line value\n"); return 1; }
+            } else {
+                fprintf(stderr, RED"Error:"RESET" Missing argument for --max-errors-per-line\n");
+                return 1;
+            }
+        }
+        else if (argv[i][0] != '-') {
             if (input == NULL) input = argv[i];
             else { fprintf(stderr, RED"Error:"RESET" Multiple input files\n"); return 1; }
         }
-        // 检查是否有未知选项
-        else
-        {
+        else {
             fprintf(stderr, RED"Error:"RESET" Unknown option: %s\n", argv[i]);
             return 1;
         }
     }
-    // 检查是否指定了输入文件
-    if (input == NULL)
-    {
+
+    if (input == NULL) {
         fprintf(stderr, RED"Error:"RESET" No input file specified\n");
         fprintf(stderr, "Use "YELLOW"%s --help"RESET" for usage information.\n", argv[0]);
         return 1;
@@ -320,22 +321,18 @@ int main (int argc, char *argv[])
 
     //=========================================== 文件打开 =========================================
 
-    // 规范化主输入文件路径
     char abs_input_path[1024];
     normalize_path(input, abs_input_path, sizeof(abs_input_path));
-    
-    // 提取主文件所在目录
+
     char base_dir[1024];
     get_directory(abs_input_path, base_dir, sizeof(base_dir));
-    
-    // 打开输入文件
+
     FILE *input_file = fopen(abs_input_path, "r");
     if (!input_file) {
         fprintf(stderr, RED"Error:"RESET" Could not open input file: %s\n", input);
         return 1;
     }
 
-    // 创建临时文件
     FILE *tmp = fopen(tmp_filename, "w+");
     if (!tmp) {
         fprintf(stderr, RED"Error:"RESET" Cannot create %s\n", tmp_filename);
@@ -346,6 +343,10 @@ int main (int argc, char *argv[])
     // 1. 预处理器
     if (!preprocess(input_file, tmp, abs_input_path, base_dir) || has_error) {
         fprintf(stderr, RED"Error:"RESET" Preprocessing failed.\n");
+        if (!quiet) {
+            printf("%d error(s), %d warning(s), %d notice(s)\n",
+                   error_count, warning_count, notice_count);
+        }
         fclose(input_file);
         fclose(tmp);
         return 1;
@@ -353,14 +354,19 @@ int main (int argc, char *argv[])
 
     // 2. 第一遍扫描
     rewind(tmp);
-    if (pass1(tmp) < 0 || has_error) {
-        fprintf(stderr, RED"Error:"RESET" First pass failed.\n");
+    int total = pass1(tmp);
+    if (total < 0) {
+        fprintf(stderr, RED"Error:"RESET" First pass failed (fatal).\n");
+        if (!quiet) {
+            printf("%d error(s), %d warning(s), %d notice(s)\n",
+                   error_count, warning_count, notice_count);
+        }
         fclose(input_file);
         fclose(tmp);
         return 1;
     }
 
-    // 3. 第二遍扫描
+    // 3. 第二遍扫描（即使 has_error 也继续，尽量收集全部错误）
     rewind(tmp);
     FILE *out = fopen(output, "wb");
     if (!out) {
@@ -371,20 +377,46 @@ int main (int argc, char *argv[])
     }
 
     int result = pass2(tmp, out, abs_input_path);
-    
-    // 4. 检查并清理半成品文件
-    if (result < 0 || has_error || ferror(out)) {
-        fprintf(stderr, RED"Error:"RESET" Assembly failed. Removing incomplete output file.\n");
+
+    if (result < 0 || ferror(out)) {
+        fprintf(stderr, RED"Error:"RESET" Assembly failed (write error). Removing incomplete output file.\n");
         fclose(out);
         fclose(tmp);
         fclose(input_file);
         remove(output);
+        if (!quiet) {
+            printf("%d error(s), %d warning(s), %d notice(s)\n",
+                   error_count, warning_count, notice_count);
+        }
         return 1;
     }
 
     fclose(out);
     fclose(input_file);
     fclose(tmp);
+
+    //=========================================== 汇总与退出 =========================================
+
+    if (!quiet) {
+        printf("%d error(s), %d warning(s), %d notice(s)\n",
+               error_count, warning_count, notice_count);
+    }
+
+    // 判定失败：有错误，或 fatal-warnings 且有警告
+    int failed = (error_count > 0) ||
+                 (fatal_warnings && warning_count > 0);
+
+    if (failed) {
+        if (error_count > 0) {
+            fprintf(stderr, RED"Error:"RESET" Assembly failed with %d error(s). "
+                    "Output file removed.\n", error_count);
+        } else {
+            fprintf(stderr, RED"Error:"RESET" Assembly failed: warnings treated as fatal "
+                    "(%d warning(s)). Output file removed.\n", warning_count);
+        }
+        remove(output);
+        return 1;
+    }
 
     if (!quiet) {
         printf(GREEN"Success:"RESET" Output written to %s\n", output);
@@ -827,36 +859,46 @@ int find_label(const char *name)
 }
 
 // 第一遍扫描：收集标签地址
-// 返回总字节数
+// 返回总字节数；仅行超长等致命情况返回 -1
 int pass1(FILE *in)
 {
     int addr = 0;
     char line[MAX_LINE];
-    
+
     while (fgets(line, sizeof(line), in)) {
         size_t len = strlen(line);
         if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
             error_msg(current_filename, current_line, line, 0, strlen(line), LEVEL_ERROR,
                       "Line too long (max %d bytes).", MAX_LINE - 1);
-            return -1;
-        }
-        
-        line[strcspn(line, "\r\n")] = '\0';
-        
-        char *comment = strchr(line, '#');
-        if (comment) *comment = '\0';
-        
-        char *trimmed = trim(line);
-        if (trimmed[0] == '\0') continue;
-        
-        if (strncmp(trimmed, ".file ", 6) == 0 || strncmp(trimmed, ".line ", 6) == 0) {
+            // 致命：吞掉本行剩余部分，继续扫描以收集更多错误
+            int c;
+            while ((c = fgetc(in)) != '\n' && c != EOF);
             continue;
         }
-        
+
+        line[strcspn(line, "\r\n")] = '\0';
+
+        char *comment = strchr(line, '#');
+        if (comment) *comment = '\0';
+
+        char *trimmed = trim(line);
+        if (trimmed[0] == '\0') continue;
+
+        // 处理 .file 和 .line 指令，更新当前文件名和行号
+        if (strncmp(trimmed, ".file \"", 7) == 0) {
+            sscanf(trimmed, ".file \"%[^\"]\"", current_filename);
+            continue;
+        }
+
+        if (strncmp(trimmed, ".line ", 6) == 0) {
+            sscanf(trimmed, ".line %d", &current_line);
+            continue;
+        }
+
         if (is_label(trimmed)) {
             char *label = extract_label(trimmed);
-            add_label(label, addr);
-            
+            add_label(label, addr);          // 失败也继续，不 return
+
             char *rest = strchr(trimmed, ':') + 1;
             rest = trim(rest);
             if (rest[0] != '\0') {
@@ -864,11 +906,12 @@ int pass1(FILE *in)
             }
             continue;
         }
-        
+
+        // 未知助记符/操作数错误留给 pass2 报，pass1 只推进地址
         addr += instruction_size(trimmed);
     }
-    
-    return (has_error ? -1 : addr);
+
+    return addr;   // 不再因 has_error 返回 -1
 }
 
 // 检查是否是标签行
@@ -906,29 +949,77 @@ int instruction_size(const char *line) {
     return INSTRUCTION_SIZE;
 }
 
-// 报错函数
-// filename: 源文件名
-// line_num: 行号
-// source: 源代码行（未经处理）
-// col: 错误起始位置（列号，从0开始）
-// len: 错误长度（字符数）
-// level: 级别
-// fmt: 错误信息格式
+// 报错函数（支持分级计数、每行去重、全局上限、Werror、级别抑制）
+//
+// 参数：
+//   filename : 源文件名
+//   line_num : 行号
+//   source   : 源代码行（未经处理，用于对齐 ^）
+//   col      : 错误起始列（从 0 开始）
+//   len      : 错误长度（字符数）
+//   level    : LEVEL_ERROR / LEVEL_WARNING / LEVEL_NOTICE
+//   fmt, ... : 消息格式
 void error_msg(const char *filename, int line_num, const char *source,
                int col, int len, int level, const char *fmt, ...)
 {
+    // ---------- 1. 级别抑制 ----------
     if (quiet && level != LEVEL_ERROR) return;
-    
-    // 修复：计算长度，防止越界导致打印海量空格
+    if (level == LEVEL_WARNING && !show_warnings) return;
+    if (level == LEVEL_NOTICE  && !show_notices)  return;
+
+    // ---------- 2. 全局错误上限 ----------
+    // 只有 ERROR 受全局上限约束；警告/提示不设上限
+    if (level == LEVEL_ERROR && error_count >= max_errors) {
+        static int too_many_reported = 0;
+        if (!too_many_reported) {
+            fprintf(stderr, "%s%s : " RESET
+                    "too many errors (limit %d), further errors suppressed\n",
+                    level_colors[LEVEL_ERROR], level_names[LEVEL_ERROR], max_errors);
+            too_many_reported = 1;
+        }
+        has_error = 1;
+        return;   // 不增加 error_count，避免无限增长
+    }
+
+    // ---------- 3. 同一行 ERROR 去重 / 每行上限 ----------
+    static const char *last_err_file = NULL;
+    static int         last_err_line = -1;
+    static int         line_err_cnt  = 0;
+
+    if (level == LEVEL_ERROR) {
+        if (filename == last_err_file && line_num == last_err_line) {
+            // 同一行
+            if (line_err_cnt >= max_errors_per_line) {
+                // 仅在该行第一次触达上限时提示
+                if (line_err_cnt == max_errors_per_line) {
+                    fprintf(stderr, "%s%s : " RESET
+                            "too many errors on this line (limit %d)\n",
+                            level_colors[LEVEL_ERROR], level_names[LEVEL_ERROR],
+                            max_errors_per_line);
+                    line_err_cnt++;
+                }
+                has_error = 1;
+                return;
+            }
+            line_err_cnt++;
+        } else {
+            // 新行
+            last_err_file = filename;
+            last_err_line = line_num;
+            line_err_cnt  = 1;
+        }
+    }
+
+    // ---------- 4. 打印 ----------
     int source_len = strlen(source);
     if (col < 0) col = 0;
     if (col > source_len) col = source_len;
     if (len < 1) len = 1;
     if (col + len > source_len) len = source_len - col;
-    
+
     fprintf(stderr, "File \"%s\", line %d\n", filename, line_num);
     fprintf(stderr, "\t%s\n", source);
-    
+
     fprintf(stderr, "\t");
     for (int i = 0; i < col; i++) {
         if (source[i] == '\t') fprintf(stderr, "    ");
@@ -939,18 +1030,28 @@ void error_msg(const char *filename, int line_num, const char *source,
         fputc('^', stderr);
     }
     fprintf(stderr, "\n");
-    
+
     fprintf(stderr, "%s%s : " RESET, level_colors[level], level_names[level]);
-    
+
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
     va_end(args);
-    
+
     fprintf(stderr, "\n");
-    
-    if (level == LEVEL_ERROR) {
+
+    // ---------- 5. Werror 升级 ----------
+    if (level == LEVEL_WARNING && werror) {
+        // 警告升级为错误：计入 error_count
         has_error = 1;
+        error_count++;
+    } else if (level == LEVEL_ERROR) {
+        has_error = 1;
+        error_count++;
+    } else if (level == LEVEL_WARNING) {
+        warning_count++;
+    } else {
+        notice_count++;
     }
 }
 
@@ -1103,22 +1204,26 @@ const char *resolve_loop_jump(const char *mnemonic, const char *operand,
     return mnemonic;
 }
 
-uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
-                const char *filename, int line_num, const char *source)
+// 编码一条指令
+// 返回 0 成功（*code_out 有效），-1 表示本行有错误（已报错，*code_out 未定义）
+int encode(Instruction *inst, const char *operands, int addr, int base,
+           const char *filename, int line_num, const char *source,
+           uint16_t *code_out)
 {
+    int errs = 0;
     uint16_t code = inst->opcode << 12;
     char args[MAX_PARAMS][MAX_NAME];
     int cols[MAX_PARAMS];
     int arg_count = 0;
-    
+
     parse_operands(operands, base, source, args, cols, &arg_count);
-    
-    // 在 switch 之前先检查参数个数
+
+    // 操作数个数不对：无法继续有意义地解析，直接返回
     if (arg_count != inst->arg_count) {
         error_msg(filename, line_num, source, 0, strlen(source), LEVEL_ERROR,
-                  "Instruction '%s' expects %d operands, but got %d.", 
+                  "Instruction '%s' expects %d operands, but got %d.",
                   inst->mnemonic, inst->arg_count, arg_count);
-        return 0; // 不会执行到这里，error_msg 会 exit(1)
+        return -1;
     }
 
     switch (inst->format) {
@@ -1128,103 +1233,118 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 code |= 0x0FFF;
             }
             break;
-            
+
         case FMT_RD:
             {
                 int rs = parse_register(args[0], filename, line_num, source, cols[0]);
-                
+                if (rs < 0) { errs++; rs = 0; }
+
                 if (strcmp(inst->mnemonic, "JUMRF") == 0 ||
                     strcmp(inst->mnemonic, "JUMRB") == 0) {
                     code |= (rs << 8);
                 } else {
                     code |= (rs << 10);
                     int rd = parse_register(args[1], filename, line_num, source, cols[1]);
+                    if (rd < 0) { errs++; rd = 0; }
                     code |= (rd << 6);
                 }
                 code |= inst->ext;
             }
             break;
-            
+
         case FMT_RR:
             {
                 int rs0 = parse_register(args[0], filename, line_num, source, cols[0]);
+                if (rs0 < 0) { errs++; rs0 = 0; }
                 int rs1 = parse_register(args[1], filename, line_num, source, cols[1]);
+                if (rs1 < 0) { errs++; rs1 = 0; }
                 code |= (rs0 << 10);
                 code |= (rs1 << 8);
                 if (inst->arg_count == 3) {
                     int rd = parse_register(args[2], filename, line_num, source, cols[2]);
+                    if (rd < 0) { errs++; rd = 0; }
                     code |= (rd << 6);
                 }
                 code |= inst->ext;
             }
             break;
-            
+
         case FMT_RRI:
             {
                 int rs0 = parse_register(args[0], filename, line_num, source, cols[0]);
+                if (rs0 < 0) { errs++; rs0 = 0; }
+
                 int imm = parse_immediate(args[1], filename, line_num, source, cols[1]);
-                
-                if (imm < 0 || imm > 255) {
+                if (imm < 0) { errs++; imm = 0; }
+                else if (imm > 255) {
                     error_msg(filename, line_num, source, cols[1], strlen(args[1]),
                               LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                    errs++; imm = 0;
                 }
-                
+
                 code |= (rs0 << 10);
                 code |= ((imm >> 6) & 0x3) << 8;
-                
+
                 if (inst->arg_count == 3) {
                     int rd = parse_register(args[2], filename, line_num, source, cols[2]);
+                    if (rd < 0) { errs++; rd = 0; }
                     code |= (rd << 6);
                 }
-                
+
                 code |= ((imm >> 4) & 0x3) << 4;
                 code |= (imm & 0xF);
             }
             break;
-            
+
         case FMT_IMM8:
-        {
-            int imm;
-            if (is_valid_identifier(args[0])) {
-                int target = find_label(args[0]);
-                if (target < 0) {
-                    error_msg(filename, line_num, source, cols[0], strlen(args[0]),
-                            LEVEL_ERROR, "Undefined label: %s", args[0]);
-                }
-                
-                if (is_backward_jump(inst->mnemonic)) {
-                    imm = addr - target;  
+            {
+                int imm;
+                if (is_valid_identifier(args[0])) {
+                    int target = find_label(args[0]);
+                    if (target < 0) {
+                        error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                                  LEVEL_ERROR, "Undefined label: %s", args[0]);
+                        errs++;
+                        imm = 0;
+                    } else if (is_backward_jump(inst->mnemonic)) {
+                        imm = addr - target;
+                    } else {
+                        imm = target - addr;
+                    }
                 } else {
-                    imm = target - addr;  
+                    imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+                    if (imm < 0) { errs++; imm = 0; }
                 }
-            } else {
-                imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+
+                if (imm < 0 || imm > 255) {
+                    error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                    errs++; imm = 0;
+                }
+
+                code |= ((imm >> 6) & 0x3) << 10;
+                code |= ((imm >> 4) & 0x3) << 8;
+                code |= ((imm >> 2) & 0x3) << 6;
+                code |= (imm & 0x3) << 4;
+                code |= inst->ext;
             }
-            
-            if (imm < 0 || imm > 255) {
-                error_msg(filename, line_num, source, cols[0], strlen(args[0]),
-                        LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
-            }
-            
-            code |= ((imm >> 6) & 0x3) << 10;
-            code |= ((imm >> 4) & 0x3) << 8;
-            code |= ((imm >> 2) & 0x3) << 6;
-            code |= (imm & 0x3) << 4;
-            code |= inst->ext;
-        }
-        break;
-            
+            break;
+
         case FMT_STORE:
             {
                 int rs1 = parse_register(args[0], filename, line_num, source, cols[0]);
+                if (rs1 < 0) { errs++; rs1 = 0; }
                 int rs0 = parse_register(args[1], filename, line_num, source, cols[1]);
+                if (rs0 < 0) { errs++; rs0 = 0; }
+
                 int imm = parse_immediate(args[2], filename, line_num, source, cols[2]);
-                
-                if (imm < 0 || imm > 255) {
+                if (imm < 0) { errs++; imm = 0; }
+                else if (imm > 255) {
                     error_msg(filename, line_num, source, cols[2], strlen(args[2]),
                               LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                    errs++; imm = 0;
                 }
-                
+
                 code |= (rs0 << 10);
                 code |= (rs1 << 8);
                 code |= ((imm >> 6) & 0x3) << 6;
@@ -1232,49 +1352,53 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 code |= (imm & 0xF);
             }
             break;
-            
+
         case FMT_CALL:
-        {
-            int rd = parse_register(args[1], filename, line_num, source, cols[1]);
-            int imm;
-            if (is_valid_identifier(args[0])) {
-                int target = find_label(args[0]);
-                if (target < 0) {
-                    error_msg(filename, line_num, source, cols[0], strlen(args[0]),
-                            LEVEL_ERROR, "Undefined label: %s", args[0]);
-                }
-                
-                if (strcmp(inst->mnemonic, "CALLB") == 0) {
-                    imm = addr - target;
-                } else {
-                    imm = target - addr;
-                }
-            } else {
-                imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
-            }
-            
-            if (imm < 0 || imm > 255) {
-                error_msg(filename, line_num, source, cols[0], strlen(args[0]),
-                        LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
-            }
-            
-            code |= ((imm >> 6) & 0x3) << 8;
-            code |= (rd << 6);
-            code |= ((imm >> 4) & 0x3) << 4;
-            code |= (imm & 0xF);
-        }
-        break;
-            
-        case FMT_SYSCALL:
             {
-                int imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
-                
-                // 范围检查
+                int rd = parse_register(args[1], filename, line_num, source, cols[1]);
+                if (rd < 0) { errs++; rd = 0; }
+
+                int imm;
+                if (is_valid_identifier(args[0])) {
+                    int target = find_label(args[0]);
+                    if (target < 0) {
+                        error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                                  LEVEL_ERROR, "Undefined label: %s", args[0]);
+                        errs++;
+                        imm = 0;
+                    } else if (strcmp(inst->mnemonic, "CALLB") == 0) {
+                        imm = addr - target;
+                    } else {
+                        imm = target - addr;
+                    }
+                } else {
+                    imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+                    if (imm < 0) { errs++; imm = 0; }
+                }
+
                 if (imm < 0 || imm > 255) {
                     error_msg(filename, line_num, source, cols[0], strlen(args[0]),
                               LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                    errs++; imm = 0;
                 }
-                
+
+                code |= ((imm >> 6) & 0x3) << 8;
+                code |= (rd << 6);
+                code |= ((imm >> 4) & 0x3) << 4;
+                code |= (imm & 0xF);
+            }
+            break;
+
+        case FMT_SYSCALL:
+            {
+                int imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+                if (imm < 0) { errs++; imm = 0; }
+                else if (imm > 255) {
+                    error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                    errs++; imm = 0;
+                }
+
                 code |= ((imm >> 6) & 0x3) << 10;
                 code |= ((imm >> 4) & 0x3) << 8;
                 code |= ((imm >> 2) & 0x3) << 6;
@@ -1282,29 +1406,35 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
             }
             break;
     }
-    
-    return code;
+
+    if (errs) return -1;
+    *code_out = code;
+    return 0;
 }
 
 // 第二遍扫描：生成机器码
+// 返回处理的总字节数；仅写文件失败等致命情况返回 -1
 int pass2(FILE *in, FILE *out, const char *filename)
 {
     int addr = 0;
     char line[MAX_LINE];
-    int tmp_line = 0; 
-    
+    int tmp_line = 0;
+
     safe_strcpy(current_filename, filename, sizeof(current_filename));
     current_line = 0;
 
     while (fgets(line, sizeof(line), in)) {
         tmp_line++;
-        
+
         // 长行截断检查
         size_t len = strlen(line);
         if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
             error_msg(current_filename, current_line, line, 0, strlen(line), LEVEL_ERROR,
                       "Line too long (max %d bytes).", MAX_LINE - 1);
-            return -1;
+            // 吞掉本行剩余部分，继续
+            int c;
+            while ((c = fgetc(in)) != '\n' && c != EOF);
+            continue;
         }
 
         line[strcspn(line, "\r\n")] = '\0';
@@ -1326,13 +1456,13 @@ int pass2(FILE *in, FILE *out, const char *filename)
         // 保留原始代码行用于报错对齐
         char source_code[MAX_LINE];
         safe_strcpy(source_code, line, MAX_LINE);
-        
+
         // 用于解析的备份（去注释）
         char parse_line[MAX_LINE];
         safe_strcpy(parse_line, line, MAX_LINE);
         char *comment = strchr(parse_line, '#');
         if (comment) *comment = '\0';
-        
+
         char *code = trim(parse_line);
         if (code[0] == '\0') continue;
 
@@ -1357,43 +1487,62 @@ int pass2(FILE *in, FILE *out, const char *filename)
         const char *operands = code + i;
         while (*operands == ' ' || *operands == '\t') operands++;
 
-        // 检查 loop 形式，并统一标识符判断
+        uint16_t code_val = 0x0000;   // 默认占位 NOP
+
+        // 检查 loop 形式
         const char *resolved = resolve_loop_jump(mnemonic, operands, addr);
         if (resolved == NULL) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(operands), LEVEL_ERROR,
-                      "Undefined label: \"%s\".", operands);
-            return -1;
+            error_msg(current_filename, current_line, source_code, 0, strlen(operands),
+                      LEVEL_ERROR, "Undefined label: \"%s\".", operands);
+            // 写占位并继续
+            uint8_t hi = 0, lo = 0;
+            if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
+                error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
+                          LEVEL_ERROR, "Failed to write machine code to output file.");
+                return -1;
+            }
+            addr++;
+            continue;
         }
 
         // 查找指令
         Instruction *inst = find_instruction(resolved);
         if (!inst) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR,
-                      "Unknown instruction: \"%s\".", mnemonic);
-            return -1;
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
+                      LEVEL_ERROR, "Unknown instruction: \"%s\".", mnemonic);
+            uint8_t hi = 0, lo = 0;
+            if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
+                error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
+                          LEVEL_ERROR, "Failed to write machine code to output file.");
+                return -1;
+            }
+            addr++;
+            continue;
         }
 
         // 计算操作数在源代码中的偏移
         int base = operands - parse_line;
 
-        // 编码
-        uint16_t code_val = encode(inst, operands, addr, base, current_filename, current_line, source_code);
-        if (has_error) return -1;
+        // 编码；失败则保留占位 0x0000
+        if (encode(inst, operands, addr, base, current_filename, current_line,
+                   source_code, &code_val) < 0) {
+            code_val = 0x0000;
+        }
 
         // 写入机器码（大端序）
         uint8_t hi = (code_val >> 8) & 0xFF;
         uint8_t lo = code_val & 0xFF;
 
         if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR,
-                      "Failed to write machine code to output file.");
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
+                      LEVEL_ERROR, "Failed to write machine code to output file.");
             return -1;
         }
 
         addr++;
     }
 
-    return (has_error ? -1 : addr);
+    return addr;
 }
 
 // 判断是否是向后跳转指令
@@ -1423,32 +1572,34 @@ int safe_strcpy(char *dest, const char *src, size_t dest_size) {
     return (src[i] != '\0') ? -1 : 0;  // 返回 -1 表示被截断
 }
 // 添加标签
-void add_label(const char *name, int addr)
+// 添加标签，返回 0 成功，-1 失败（已报错）
+int add_label(const char *name, int addr)
 {
     if (!is_valid_identifier(name)) {
         error_msg(current_filename, current_line, name, 0, strlen(name), LEVEL_ERROR,
                   "Invalid label name: \"%s\".", name);
-        return;
+        return -1;
     }
-    
+
     if (label_count >= MAX_LABELS) {
         error_msg(current_filename, current_line, name, 0, strlen(name), LEVEL_ERROR,
                   "Too many labels (max %d).", MAX_LABELS);
-        return;
+        return -1;
     }
-    
+
     // 重复检测
     for (int i = 0; i < label_count; i++) {
         if (strcmp(labels[i].name, name) == 0) {
             error_msg(current_filename, current_line, name, 0, strlen(name), LEVEL_ERROR,
                       "Duplicate label definition: \"%s\".", name);
-            return;
+            return -1;
         }
     }
-    
+
     safe_strcpy(labels[label_count].name, name, MAX_NAME);
     labels[label_count].addr = addr;
     label_count++;
+    return 0;
 }
 
 // 检查是否是合法标识符
