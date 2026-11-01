@@ -118,9 +118,7 @@ char  *trim(char *s);
 void  handle_define(const char *line, const char *current_file, int current_line_num);
 Macro *find_macro(const char *name);
 void  replace_word(char *result, const char *word, const char *replacement);
-int   preprocess(FILE *in, FILE *out, const char *filename);
 int   expand_line(const char *line, FILE *out, int line_num);
-int   handle_include(const char *line, FILE *out, int depth, const char *current_filename);
 int   expand_param_macro(const char *line, Macro *m, FILE *out, int line_num);
 int   replace_all_macros(char *line);
 void  add_label(const char *name, int addr);
@@ -146,7 +144,16 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
 int  pass2(FILE *in, FILE *out, const char *filename);
 int  is_backward_jump(const char *mnemonic);
 int  safe_strcpy(char *dest, const char *src, size_t dest_size);
-int is_valid_identifier(const char *s);
+int  is_valid_identifier(const char *s);
+int  is_absolute_path(const char *path);
+int  is_path_sep(char c);
+void unify_separators(char *path);
+int  normalize_path(const char *in, char *out, size_t out_size);
+void get_directory(const char *file_path, char *dir, size_t dir_size);
+void resolve_include_path(const char *base_dir, const char *include_name, char *out_path, size_t out_size);
+
+int  preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir);
+int  handle_include(const char *line, FILE *out, int depth, const char *caller_file, const char *base_dir);
 
 //=========================== 全局变量 ===========================
 
@@ -313,8 +320,16 @@ int main (int argc, char *argv[])
 
     //=========================================== 文件打开 =========================================
 
+    // 规范化主输入文件路径
+    char abs_input_path[1024];
+    normalize_path(input, abs_input_path, sizeof(abs_input_path));
+    
+    // 提取主文件所在目录
+    char base_dir[1024];
+    get_directory(abs_input_path, base_dir, sizeof(base_dir));
+    
     // 打开输入文件
-    FILE *input_file = fopen(input, "r");
+    FILE *input_file = fopen(abs_input_path, "r");
     if (!input_file) {
         fprintf(stderr, RED"Error:"RESET" Could not open input file: %s\n", input);
         return 1;
@@ -329,7 +344,7 @@ int main (int argc, char *argv[])
     }
 
     // 1. 预处理器
-    if (!preprocess(input_file, tmp, input) || has_error) {
+    if (!preprocess(input_file, tmp, abs_input_path, base_dir) || has_error) {
         fprintf(stderr, RED"Error:"RESET" Preprocessing failed.\n");
         fclose(input_file);
         fclose(tmp);
@@ -355,7 +370,7 @@ int main (int argc, char *argv[])
         return 1;
     }
 
-    int result = pass2(tmp, out, input);
+    int result = pass2(tmp, out, abs_input_path);
     
     // 4. 检查并清理半成品文件
     if (result < 0 || has_error || ferror(out)) {
@@ -363,7 +378,7 @@ int main (int argc, char *argv[])
         fclose(out);
         fclose(tmp);
         fclose(input_file);
-        remove(output); // 关键：删除坏文件
+        remove(output);
         return 1;
     }
 
@@ -379,9 +394,9 @@ int main (int argc, char *argv[])
 }
 
 // 预处理器
-int preprocess(FILE *in, FILE *out, const char *filename)
+int preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir)
 {
-    char line[MAX_LINE];  // 统一为 1024
+    char line[MAX_LINE];
     int line_num = 0;
 
     fprintf(out, ".file \"%s\"\n", filename);
@@ -390,14 +405,13 @@ int preprocess(FILE *in, FILE *out, const char *filename)
     {
         line_num++;
         
-        // 检查是否被截断
         size_t len = strlen(line);
         if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
             error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
                       "Line too long (max %d bytes).", MAX_LINE - 1);
             int c;
             while ((c = fgetc(in)) != '\n' && c != EOF);
-            return 0;  // 直接失败
+            return 0;
         }
         
         fprintf(out, ".line %d\n", line_num);
@@ -415,7 +429,7 @@ int preprocess(FILE *in, FILE *out, const char *filename)
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
-                if (!handle_include(trimmed, out, 0, filename)) {
+                if (!handle_include(trimmed, out, 0, filename, base_dir)) {
                     return 0;
                 }
                 continue;
@@ -496,22 +510,27 @@ void handle_define(const char *line, const char *current_file, int current_line_
 }
 
 // caller_file 是包含此文件的上一级文件（例如 test.asm）
-int handle_include(const char *line, FILE *out, int depth, const char *caller_file)
+int handle_include(const char *line, FILE *out, int depth, const char *caller_file, const char *base_dir)
 {
     if (depth > 16) {
         error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Include depth exceeded");
         return 0;
     }
     
-    char filename[256] = "";
-    if (sscanf(line, ".include \"%[^\"]\"", filename) != 1) {
+    char include_name[256] = "";
+    if (sscanf(line, ".include \"%[^\"]\"", include_name) != 1) {
         error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Invalid include syntax");
         return 0;
     }
     
+    // 解析包含文件的完整路径（以调用者所在目录为基准）
+    char resolved_path[1024];
+    resolve_include_path(base_dir, include_name, resolved_path, sizeof(resolved_path));
+    
+    // 循环包含检测（用完整路径比较，彻底解决 ./a.asm 和 a.asm 冲突）
     for (int i = 0; i < include_count; i++) {
-        if (strcmp(included_files[i], filename) == 0) {
-            error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Circular include: %s", filename);
+        if (strcmp(included_files[i], resolved_path) == 0) {
+            error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Circular include: %s", resolved_path);
             return 0;
         }
     }
@@ -520,17 +539,22 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
         error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Too many includes");
         return 0;
     }
-    safe_strcpy(included_files[include_count], filename, 256);
+    safe_strcpy(included_files[include_count], resolved_path, 256);
     include_count++;
     
-    FILE *inc = fopen(filename, "r");
+    FILE *inc = fopen(resolved_path, "r");
     if (!inc) {
-        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Cannot open include: %s", filename);
+        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Cannot open include: %s", resolved_path);
         include_count--;
         return 0;
     }
     
-    fprintf(out, ".file \"%s\"\n", filename);
+    // 提取被包含文件所在的目录，供嵌套包含使用
+    char new_base_dir[1024];
+    get_directory(resolved_path, new_base_dir, sizeof(new_base_dir));
+    
+    // 记录被包含文件的绝对（或规范）路径
+    fprintf(out, ".file \"%s\"\n", resolved_path);
 
     char buf[MAX_LINE];
     int line_num = 0;
@@ -539,7 +563,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
         
         size_t len = strlen(buf);
         if (len == sizeof(buf) - 1 && buf[len - 1] != '\n' && !feof(inc)) {
-            error_msg(filename, line_num, buf, 0, strlen(buf), LEVEL_ERROR,
+            error_msg(resolved_path, line_num, buf, 0, strlen(buf), LEVEL_ERROR,
                       "Line too long (max %d bytes).", MAX_LINE - 1);
             int c;
             while ((c = fgetc(inc)) != '\n' && c != EOF);
@@ -558,12 +582,11 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
         
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
-                handle_define(trimmed, filename, line_num);
+                handle_define(trimmed, resolved_path, line_num);
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
-                if (!handle_include(trimmed, out, depth + 1, filename)) {
-                    // 嵌套失败，直接返回
+                if (!handle_include(trimmed, out, depth + 1, resolved_path, new_base_dir)) {
                     fclose(inc);
                     include_count--;
                     return 0;
@@ -1436,4 +1459,148 @@ int is_valid_identifier(const char *s) {
         if (!isalnum((unsigned char)*p) && *p != '_') return 0;
     }
     return 1;
+}
+
+// ============================================================
+// 路径处理工具函数（纯 C 标准库，跨平台）
+// ============================================================
+
+// 判断是否是绝对路径（兼容 Windows 和 Unix）
+int is_absolute_path(const char *path) {
+    if (!path || !*path) return 0;
+    // Unix 的 / 或 Windows 的 \ 开头
+    if (path[0] == '/' || path[0] == '\\') return 1;
+    // Windows 的 C: 盘符
+    if (strlen(path) > 1 && path[1] == ':') return 1;
+    return 0;
+}
+
+// 判断是否是路径分隔符
+int is_path_sep(char c) {
+    return c == '/' || c == '\\';
+}
+
+// 将路径中的反斜杠统一替换为正斜杠（统一输出格式）
+void unify_separators(char *path) {
+    for (char *p = path; *p; p++) {
+        if (*p == '\\') *p = '/';
+    }
+}
+
+// 规范化路径：处理 ./、../ 和重复的斜杠
+// 返回 0 成功，-1 失败
+int normalize_path(const char *in, char *out, size_t out_size) {
+    if (!in || !out || out_size == 0) return -1;
+    
+    if (in[0] == '\0') {
+        out[0] = '\0';
+        return 0;
+    }
+
+    char temp[1024];
+    safe_strcpy(temp, in, sizeof(temp));
+    unify_separators(temp);
+
+    char *segments[256];
+    int seg_count = 0;
+    char *p = temp;
+    int is_abs = (temp[0] == '/');
+    int drive_len = 0;
+
+    // 处理 Windows 盘符
+    if (strlen(temp) > 1 && temp[1] == ':') {
+        drive_len = 2;
+        p = temp + 2;
+        while (is_path_sep(*p)) p++;
+    } else if (is_abs) {
+        p++;
+    }
+
+    // 切割段
+    char *token = p;
+    while (*p) {
+        if (is_path_sep(*p)) {
+            *p = '\0';
+            if (token[0] != '\0') {
+                segments[seg_count++] = token;
+            }
+            token = p + 1;
+        }
+        p++;
+    }
+    if (token[0] != '\0') {
+        segments[seg_count++] = token;
+    }
+
+    // 处理 . 和 ..
+    char *result[256];
+    int res_count = 0;
+
+    for (int i = 0; i < seg_count; i++) {
+        if (strcmp(segments[i], ".") == 0) {
+            continue;
+        } else if (strcmp(segments[i], "..") == 0) {
+            if (res_count > 0 && strcmp(result[res_count - 1], "..") != 0) {
+                res_count--;
+            } else if (!is_abs && drive_len == 0) {
+                result[res_count++] = "..";
+            }
+        } else {
+            result[res_count++] = segments[i];
+        }
+    }
+
+    // 重新拼接
+    out[0] = '\0';
+    size_t len = 0;
+
+    if (drive_len > 0) {
+        len += snprintf(out + len, out_size - len, "%.*s", drive_len, temp);
+        if (res_count > 0) len += snprintf(out + len, out_size - len, "/");
+    } else if (is_abs) {
+        len += snprintf(out + len, out_size - len, "/");
+    }
+
+    for (int i = 0; i < res_count; i++) {
+        len += snprintf(out + len, out_size - len, "%s", result[i]);
+        if (i < res_count - 1) {
+            len += snprintf(out + len, out_size - len, "/");
+        }
+    }
+
+    if (out[0] == '\0' && is_abs) {
+        safe_strcpy(out, "/", out_size);
+    }
+
+    return 0;
+}
+
+// 提取文件所在目录（包含末尾的斜杠）
+void get_directory(const char *file_path, char *dir, size_t dir_size) {
+    const char *last_slash = strrchr(file_path, '/');
+    const char *last_backslash = strrchr(file_path, '\\');
+    const char *last_sep = (last_slash > last_backslash) ? last_slash : last_backslash;
+    
+    if (last_sep) {
+        size_t len = last_sep - file_path + 1;
+        if (len < dir_size) {
+            strncpy(dir, file_path, len);
+            dir[len] = '\0';
+        } else {
+            dir[0] = '\0';
+        }
+    } else {
+        dir[0] = '\0';
+    }
+}
+
+// 将相对路径拼接到基准目录下
+void resolve_include_path(const char *base_dir, const char *include_name, char *out_path, size_t out_size) {
+    if (is_absolute_path(include_name)) {
+        normalize_path(include_name, out_path, out_size);
+    } else {
+        char temp[1024];
+        snprintf(temp, sizeof(temp), "%s%s", base_dir, include_name);
+        normalize_path(temp, out_path, out_size);
+    }
 }
