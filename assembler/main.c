@@ -811,19 +811,20 @@ int instruction_size(const char *line) {
 void error_msg(const char *filename, int line_num, const char *source,
                int col, int len, int level, const char *fmt, ...)
 {
-    // 安静模式只输出 Error
     if (quiet && level != LEVEL_ERROR) return;
     
-    // 第一行：文件名和行号
-    fprintf(stderr, "File \"%s\", line %d\n", filename, line_num);
+    // 修复：计算长度，防止越界导致打印海量空格
+    int source_len = strlen(source);
+    if (col < 0) col = 0;
+    if (col > source_len) col = source_len;
+    if (len < 1) len = 1;
+    if (col + len > source_len) len = source_len - col;
     
-    // 第二行：源代码
+    fprintf(stderr, "File \"%s\", line %d\n", filename, line_num);
     fprintf(stderr, "\t%s\n", source);
     
-    // 第三行：^ 对齐
     fprintf(stderr, "\t");
     for (int i = 0; i < col; i++) {
-        // 制表符按 4 空格算
         if (source[i] == '\t') fprintf(stderr, "    ");
         else fputc(' ', stderr);
     }
@@ -833,7 +834,6 @@ void error_msg(const char *filename, int line_num, const char *source,
     }
     fprintf(stderr, "\n");
     
-    // 第四行：错误信息
     fprintf(stderr, "%s%s : " RESET, level_colors[level], level_names[level]);
     
     va_list args;
@@ -843,7 +843,6 @@ void error_msg(const char *filename, int line_num, const char *source,
     
     fprintf(stderr, "\n");
     
-    // Error 退出
     if (level == LEVEL_ERROR) {
         exit(1);
     }
@@ -1135,7 +1134,6 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
     return code;
 }
 
-// 第二遍扫描：生成机器码
 int pass2(FILE *in, FILE *out, const char *filename)
 {
     int addr = 0;
@@ -1161,7 +1159,7 @@ int pass2(FILE *in, FILE *out, const char *filename)
         char *trimmed = trim(line);
         if (trimmed[0] == '\0') continue;
         
-        // 跳过标签
+        // 处理标签
         if (is_label(trimmed)) {
             char *rest = strchr(trimmed, ':') + 1;
             rest = trim(rest);
@@ -1182,25 +1180,44 @@ int pass2(FILE *in, FILE *out, const char *filename)
         const char *operands = trimmed + i;
         while (*operands == ' ' || *operands == '\t') operands++;
         
-        // 计算 base（操作数字符串在原始行里的偏移）
-        int base = operands - original;
+        // 检查是否是宏调用（针对宏展开的代码做特殊处理）
+        Macro *m = find_macro(mnemonic);
+        int base = 0;
+        const char *err_source = original; 
+        int err_col = 0;
+        
+        if (m) {
+            // 如果是宏展开生成的行，直接在原始行找宏名并报错，不再往下解析
+            err_col = 0; // 宏名通常在开头
+            char *macro_pos = strstr(original, mnemonic);
+            if (macro_pos) err_col = macro_pos - original;
+            
+            // 因为宏展开后的代码不在原文件里，找不到错位点，直接报错
+            error_msg(filename, line_num, original, err_col, strlen(mnemonic), LEVEL_ERROR,
+                      "Macro expansion generated invalid instruction/operand.");
+        } else {
+            // 普通指令，计算 base
+            base = operands - original;
+            err_source = original;
+        }
         
         // 检查 loop 形式
         const char *resolved = resolve_loop_jump(mnemonic, operands, addr);
         if (resolved == NULL) {
-            error_msg(filename, line_num, original, 0, strlen(mnemonic),
+            error_msg(filename, line_num, err_source, 0, strlen(mnemonic),
                       LEVEL_ERROR, "Undefined label: %s", operands);
         }
         
         // 查找指令
         Instruction *inst = find_instruction(resolved);
         if (!inst) {
-            error_msg(filename, line_num, original, 0, strlen(mnemonic),
+            error_msg(filename, line_num, err_source, 0, strlen(mnemonic),
                       LEVEL_ERROR, "Unknown instruction: %s", mnemonic);
         }
         
         // 编码
-        uint16_t code = encode(inst, operands, addr, base, filename, line_num, original);
+        // 注意：此处 err_source 必须传 original，如果发生了报错，里面的 col 都是基于 original 算的
+        uint16_t code = encode(inst, operands, addr, base, filename, line_num, err_source);
         
         // 写入输出
         uint8_t hi = (code >> 8) & 0xFF;

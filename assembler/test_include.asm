@@ -1,1 +1,1 @@
-.define INC(a) ADDI a, 1, a
+.define INC(a) ADDI a, 1, a :NOP
