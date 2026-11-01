@@ -326,6 +326,8 @@ int main (int argc, char *argv[])
     fclose(input_file);
     fclose(tmp);
     
+    remove("tmp.asm");
+
     return 0;
 }
 
@@ -738,6 +740,11 @@ int pass1(FILE *in)
         char *trimmed = trim(line);
         if (trimmed[0] == '\0') continue;
         
+        // 【新增】跳过 .file 和 .line 标记
+        if (strncmp(trimmed, ".file ", 6) == 0 || strncmp(trimmed, ".line ", 6) == 0) {
+            continue;
+        }
+        
         if (is_label(trimmed)) {
             char *label = extract_label(trimmed);
             add_label(label, addr);
@@ -965,6 +972,14 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
     
     parse_operands(operands, base, source, args, cols, &arg_count);
     
+    // 在 switch 之前先检查参数个数
+    if (arg_count != inst->arg_count) {
+        error_msg(filename, line_num, source, 0, strlen(source), LEVEL_ERROR,
+                  "Instruction '%s' expects %d operands, but got %d.", 
+                  inst->mnemonic, inst->arg_count, arg_count);
+        return 0; // 不会执行到这里，error_msg 会 exit(1)
+    }
+
     switch (inst->format) {
         case FMT_NONE:
             code |= inst->ext;
@@ -979,10 +994,8 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 
                 if (strcmp(inst->mnemonic, "JUMRF") == 0 ||
                     strcmp(inst->mnemonic, "JUMRB") == 0) {
-                    // JUMRF/JUMRB: Rs_0 在 [9:8]
                     code |= (rs << 8);
                 } else {
-                    // RIGHT/EXPC: Rs_0 在 [11:10], Rd 在 [7:6]
                     code |= (rs << 10);
                     int rd = parse_register(args[1], filename, line_num, source, cols[1]);
                     code |= (rd << 6);
@@ -1039,9 +1052,9 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 }
                 
                 if (is_backward_jump(inst->mnemonic)) {
-                    imm = addr - target;  // 向后跳转
+                    imm = addr - target;  
                 } else {
-                    imm = target - addr;  // 向前跳转
+                    imm = target - addr;  
                 }
             } else {
                 imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
@@ -1062,8 +1075,6 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
             
         case FMT_STORE:
             {
-                // 汇编顺序：STORE Rs_1, Rs_0, imm8
-                // 硬件顺序：[11:10]=Rs_0, [9:8]=Rs_1, [7:6]=imm[7:6], [5:4]=imm[5:4], [3:0]=imm[3:0]
                 int rs1 = parse_register(args[0], filename, line_num, source, cols[0]);
                 int rs0 = parse_register(args[1], filename, line_num, source, cols[1]);
                 int imm = parse_immediate(args[2], filename, line_num, source, cols[2]);
@@ -1093,9 +1104,9 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 }
                 
                 if (strcmp(inst->mnemonic, "CALLB") == 0) {
-                    imm = addr - target;  // 向后
+                    imm = addr - target;
                 } else {
-                    imm = target - addr;  // 向前
+                    imm = target - addr;
                 }
             } else {
                 imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
