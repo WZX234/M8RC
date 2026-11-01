@@ -1,4 +1,3 @@
-#include <time.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <errno.h>
@@ -130,7 +129,6 @@ typedef struct {
     char     source[MAX_LINE];  // 源码原文（保留注释）
 } ListingEntry;
 
-void  cleanup_tmp(void);
 char  *trim(char *s);
 void  handle_define(const char *line, const char *current_file, int current_line_num);
 Macro *find_macro(const char *name);
@@ -212,9 +210,6 @@ int include_count = 0;
 char current_filename[256] = "";
 int current_line = 0;
 
-// 临时文件名
-char tmp_filename[256] = "";
-
 // 错误标志
 int has_error = 0;
 
@@ -256,19 +251,6 @@ static int       g_word_cap   = 0; // 容量
 
 int main(int argc, char *argv[])
 {
-    // 获取当前时间戳
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-
-    // 生成临时文件名
-    snprintf(tmp_filename, sizeof(tmp_filename),
-             "tmp_%04d%02d%02d_%02d%02d%02d.asm",
-             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-             t->tm_hour, t->tm_min, t->tm_sec);
-
-    // 注册退出清理
-    atexit(cleanup_tmp);
-
     //=========================================== 参数解析 =========================================
 
     for (int i = 1; i < argc; i++) {
@@ -403,9 +385,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    FILE *tmp = fopen(tmp_filename, "w+");
+    FILE *tmp = tmpfile();
     if (!tmp) {
-        fprintf(stderr, RED"Error:"RESET" Cannot create %s\n", tmp_filename);
+        fprintf(stderr, RED"Error:"RESET" Cannot create temporary file.\n");
         fclose(input_file);
         return 1;
     }
@@ -1718,13 +1700,6 @@ int is_backward_jump(const char *mnemonic) {
            strcmp(mnemonic, "JROB")  == 0;
 }
 
-// 退出时的清理函数
-void cleanup_tmp(void) {
-    if (tmp_filename[0] != '\0') {
-        remove(tmp_filename);
-    }
-}
-
 // 安全字符串拷贝，返回 0 表示截断
 int safe_strcpy(char *dest, const char *src, size_t dest_size) {
     if (dest_size == 0) return -1;
@@ -1736,6 +1711,7 @@ int safe_strcpy(char *dest, const char *src, size_t dest_size) {
     dest[i] = '\0';
     return (src[i] != '\0') ? -1 : 0;  // 返回 -1 表示被截断
 }
+
 // 添加标签
 // 添加标签，返回 0 成功，-1 失败（已报错）
 int add_label(const char *name, int addr)
