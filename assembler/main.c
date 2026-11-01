@@ -18,7 +18,7 @@
 #define RESET    "\033[0m"
 
 // information
-#define VERSION "0.0.1"
+#define VERSION "1.0.0"
 
 #define INSTRUCTION_SIZE 1  // 每条指令占用的字节数（16位 = 2字节）
 
@@ -124,10 +124,10 @@ void  cleanup_tmp(void);
 char  *trim(char *s);
 void  handle_define(const char *line, const char *current_file, int current_line_num);
 Macro *find_macro(const char *name);
-void  replace_word(char *result, const char *word, const char *replacement);
+int   replace_word(char *result, size_t cap, const char *word, const char *replacement);
 int   expand_line(const char *line, FILE *out, int line_num);
 int   expand_param_macro(const char *line, Macro *m, FILE *out, int line_num);
-int   replace_all_macros(char *line);
+int   replace_all_macros(char *line, size_t cap, int *truncated);
 int   add_label(const char *name, int addr);
 int   find_label(const char *name);
 int   pass1(FILE *in);
@@ -170,6 +170,8 @@ static int write_hex(FILE *out);
 static int write_logisim(FILE *out);
 static int write_output(FILE *out, const char *format);
 static int is_valid_format(const char *format);
+static int safe_append(char *dst, size_t cap, size_t *used, const char *src);
+static int safe_putc(char *dst, size_t cap, size_t *used, char c);
 
 //=========================== 全局变量 ===========================
 
@@ -470,7 +472,7 @@ int preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir)
     while (fgets(line, sizeof(line), in))
     {
         line_num++;
-        
+
         size_t len = strlen(line);
         if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
             error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
@@ -479,19 +481,19 @@ int preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir)
             while ((c = fgetc(in)) != '\n' && c != EOF);
             return 0;
         }
-        
+
         fprintf(out, ".line %d\n", line_num);
-        line[strcspn(line, "\r\n")] = '\0'; 
-        
+        line[strcspn(line, "\r\n")] = '\0';
+
         char *comment = strchr(line, '#');
-        if (comment) *comment = '\0'; 
+        if (comment) *comment = '\0';
 
         char *trimmed = trim(line);
         if (trimmed[0] == '\0') continue;
 
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
-                handle_define(trimmed, filename, line_num); 
+                handle_define(trimmed, filename, line_num);
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
@@ -503,10 +505,11 @@ int preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir)
         }
 
         int r = expand_line(trimmed, out, line_num);
-        if (r < 0) {
+        if (r == -1) {
             fputs(trimmed, out);
             fputc('\n', out);
         }
+        // r == -2：expand_line 已写截断结果，不再重复
     }
     return (has_error ? 0 : 1);
 }
@@ -662,10 +665,11 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
         }
         
         int r = expand_line(trimmed, out, line_num);
-        if (r < 0) {
+        if (r == -1) {
             fputs(trimmed, out);
             fputc('\n', out);
         }
+        // r == -2：expand_line 已写截断结果，不再重复
     }
     
     fclose(inc);
@@ -675,41 +679,55 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
     return (has_error ? 0 : 1);
 }
 
-// 增加 line_num 参数
 // 展开一行
 // 返回值：
-//   >= 0：是宏，返回写入的行数
-//   -1：不是宏，未写入
+//   >0 ：是宏，返回写入的行数
+//   -1 ：不是宏，未写入
+//   -2 ：展开截断，已写出截断结果（调用方不要再写原行）
 int expand_line(const char *line, FILE *out, int line_num)
 {
     char first[MAX_NAME];
     int i = 0;
-    while (line[i] && line[i] != ' ' && line[i] != '\t' && i < MAX_NAME-1) {
+    while (line[i] && line[i] != ' ' && line[i] != '\t' && i < MAX_NAME - 1) {
         first[i] = line[i];
         i++;
     }
     first[i] = '\0';
-    
+
     Macro *m = find_macro(first);
-    
+
     if (m && m->param_count > 0) {
         return expand_param_macro(line, m, out, line_num);
     }
-    
-    char result[MAX_VALUE];
-    strcpy(result, line);
+
+    // 用 MAX_LINE 而不是 MAX_VALUE：源行本身可能接近 MAX_LINE
+    char result[MAX_LINE];
+    if (safe_strcpy(result, line, sizeof(result)) != 0) {
+        error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                  "Line too long to expand (max %d bytes).", MAX_LINE - 1);
+        return -1;
+    }
 
     int total = 0;
+    int truncated = 0;
     for (int pass = 0; pass < 32; pass++) {
-        int changed = replace_all_macros(result);
+        int changed = replace_all_macros(result, sizeof(result), &truncated);
+        if (truncated) break;
         if (changed == 0) break;
         total += changed;
     }
 
+    if (truncated) {
+        error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                  "Macro expansion exceeds %d bytes (truncated).", MAX_LINE - 1);
+        fprintf(out, ".line %d\n", line_num);
+        fputs(result, out);
+        fputc('\n', out);
+        return -2;
+    }
+
     if (total > 0 || m) {
-        // 对于无参宏替换，报错位置可以保留在调用处，也可以跳回定义处。
-        // 为统一起见，这里保留在调用处，因为行内替换通常不会写错。
-        fprintf(out, ".line %d\n", line_num); 
+        fprintf(out, ".line %d\n", line_num);
         fputs(result, out);
         fputc('\n', out);
         return 1;
@@ -719,27 +737,41 @@ int expand_line(const char *line, FILE *out, int line_num)
 }
 
 // 替换宏参数
-void replace_word(char *result, const char *word, const char *replacement)
+// 在 result（容量 cap）中把独立单词 word 替换为 replacement。
+// 返回 0 成功；-1 表示结果被截断（内存安全，但语义不完整）。
+int replace_word(char *result, size_t cap, const char *word, const char *replacement)
 {
-    char temp[MAX_VALUE];
-    char *p = result;
-    char *out = temp;
-    
+    char temp[MAX_LINE];       // 与源行同尺寸
+    size_t used = 0;
+    int truncated = 0;
+
+    const char *p = result;
+    size_t wlen = strlen(word);
+
     while (*p) {
-        if (strncmp(p, word, strlen(word)) == 0) {
-            int before_ok = (p == result || !isalnum((unsigned char)*(p-1)));
-            int after_ok = !isalnum((unsigned char)*(p + strlen(word)));
+        if (wlen > 0 && strncmp(p, word, wlen) == 0) {
+            int before_ok = (p == result || !isalnum((unsigned char)*(p - 1)));
+            int after_ok  = !isalnum((unsigned char)*(p + wlen));
             if (before_ok && after_ok) {
-                strcpy(out, replacement);
-                out += strlen(replacement);
-                p += strlen(word);
+                if (safe_append(temp, sizeof(temp), &used, replacement) < 0) {
+                    truncated = 1;
+                    break;
+                }
+                p += wlen;
                 continue;
             }
         }
-        *out++ = *p++;
+        if (safe_putc(temp, sizeof(temp), &used, *p) < 0) {
+            truncated = 1;
+            break;
+        }
+        p++;
     }
-    *out = '\0';
-    strcpy(result, temp);
+
+    if (safe_strcpy(result, temp, cap) != 0) {
+        truncated = 1;
+    }
+    return truncated ? -1 : 0;
 }
 
 // 查找宏定义
@@ -775,110 +807,140 @@ char *trim(char *s) {
 // out: 输出文件
 // line_num: 当前行号
 // 返回：写入的行数
-// 展开带参宏
 int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
 {
     const char *p = line;
     while (*p && *p != ' ' && *p != '\t') p++;
     while (*p == ' ' || *p == '\t') p++;
-    
+
     char args[MAX_PARAMS][MAX_NAME];
     int arg_count = 0;
     while (*p && arg_count < MAX_PARAMS) {
         int j = 0;
-        while (*p && *p != ',' && j < MAX_NAME-1) {
+        while (*p && *p != ',' && j < MAX_NAME - 1) {
             args[arg_count][j++] = *p++;
         }
         args[arg_count][j] = '\0';
-        while (j > 0 && args[arg_count][j-1] == ' ') {
+        while (j > 0 && args[arg_count][j - 1] == ' ') {
             args[arg_count][--j] = '\0';
         }
         arg_count++;
         if (*p == ',') p++;
     }
-    
+
     // 检查参数个数是否匹配
     if (arg_count != m->param_count) {
         error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
-                  "Macro '%s' expects %d arguments, but got %d.", 
+                  "Macro '%s' expects %d arguments, but got %d.",
                   m->name, m->param_count, arg_count);
         return 0;
     }
-    
+
     char value_copy[MAX_VALUE];
-    strncpy(value_copy, m->value, MAX_VALUE - 1);
-    value_copy[MAX_VALUE - 1] = '\0';
-    
+    if (safe_strcpy(value_copy, m->value, sizeof(value_copy)) != 0) {
+        error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                  "Macro value too long (max %d).", MAX_VALUE - 1);
+        return 0;
+    }
+
     int written = 0;
     char *segment = strtok(value_copy, ";");
     while (segment) {
         char *trimmed_seg = trim(segment);
         if (trimmed_seg[0] != '\0') {
-            char expanded[MAX_VALUE];
-            strncpy(expanded, trimmed_seg, MAX_VALUE - 1);
-            expanded[MAX_VALUE - 1] = '\0';
-            
+            char expanded[MAX_LINE];   // 与源行同尺寸，容纳替换后增长
+            if (safe_strcpy(expanded, trimmed_seg, sizeof(expanded)) != 0) {
+                error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                          "Macro body segment too long (max %d bytes).", MAX_LINE - 1);
+                return written;
+            }
+
             for (int k = 0; k < m->param_count && k < arg_count; k++) {
-                replace_word(expanded, m->params[k], args[k]);
+                if (replace_word(expanded, sizeof(expanded),
+                                 m->params[k], args[k]) < 0) {
+                    error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                              "Macro '%s' expansion truncated (max %d bytes).",
+                              m->name, MAX_LINE - 1);
+                    // 继续写出截断结果，让 pass 报更多错
+                }
             }
-            
+
+            int trunc = 0;
             for (int pass = 0; pass < 32; pass++) {
-                if (replace_all_macros(expanded) == 0) break;
+                int changed = replace_all_macros(expanded, sizeof(expanded), &trunc);
+                if (trunc) break;
+                if (changed == 0) break;
             }
-            
+            if (trunc) {
+                error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                          "Macro '%s' expansion truncated (max %d bytes).",
+                          m->name, MAX_LINE - 1);
+            }
+
             fprintf(out, ".file \"%s\"\n", m->source_file);
             fprintf(out, ".line %d\n", m->source_line);
-            
             fputs(expanded, out);
             fputc('\n', out);
             written++;
         }
         segment = strtok(NULL, ";");
     }
-    
+
     return written;
 }
 
-// 替换一行中所有无参宏，返回替换次数
-int replace_all_macros(char *line)
+// 替换一行中所有无参宏。
+// 返回替换次数；*truncated 置 1 表示结果被截断。
+int replace_all_macros(char *line, size_t cap, int *truncated)
 {
-    char temp[MAX_VALUE];
-    strcpy(temp, line);
-    
-    char *p = temp;
-    char *outp = line;
+    if (truncated) *truncated = 0;
+
+    char temp[MAX_LINE];
+    size_t used = 0;
     int changed = 0;
-    
+    int trunc = 0;
+
+    const char *p = line;
     while (*p) {
-        // 检查是否是标识符开头
         if (isalpha((unsigned char)*p) || *p == '_') {
             char ident[MAX_NAME];
             int i = 0;
-            char *start = p;
-            
-            // 提取标识符
-            while ((isalnum((unsigned char)*p) || *p == '_') && i < MAX_NAME-1) {
+            const char *start = p;
+
+            while ((isalnum((unsigned char)*p) || *p == '_') && i < MAX_NAME - 1) {
                 ident[i++] = *p++;
             }
             ident[i] = '\0';
-            
-            // 查宏表
+
             Macro *m = find_macro(ident);
             if (m && m->param_count == 0) {
-                // 无参宏，替换
-                strcpy(outp, m->value);
-                outp += strlen(m->value);
+                if (safe_append(temp, sizeof(temp), &used, m->value) < 0) {
+                    trunc = 1;
+                    break;
+                }
                 changed++;
             } else {
-                // 不是宏，原样拷贝
-                while (start < p) *outp++ = *start++;
+                // 不是宏，原样拷贝这个 token
+                while (start < p) {
+                    if (safe_putc(temp, sizeof(temp), &used, *start) < 0) {
+                        trunc = 1;
+                        break;
+                    }
+                    start++;
+                }
+                if (trunc) break;
             }
         } else {
-            *outp++ = *p++;
+            if (safe_putc(temp, sizeof(temp), &used, *p) < 0) {
+                trunc = 1;
+                break;
+            }
+            p++;
         }
     }
-    *outp = '\0';
-    
+
+    if (safe_strcpy(line, temp, cap) != 0) trunc = 1;
+    if (truncated) *truncated = trunc;
     return changed;
 }
 
@@ -1863,4 +1925,37 @@ static int is_valid_format(const char *format)
     return strcmp(format, "bin") == 0
         || strcmp(format, "hex") == 0
         || strcmp(format, "logisim") == 0;
+}
+
+// 把 src 追加到 dst 末尾。dst 总容量 cap，*used 是当前已用长度（不含 '\0'）。
+// 成功返回 0；空间不足返回 -1（已尽量写入，dst 保证 '\0' 结尾）。
+static int safe_append(char *dst, size_t cap, size_t *used, const char *src)
+{
+    size_t u = *used;
+    while (*src) {
+        if (u + 1 >= cap) {
+            dst[u] = '\0';
+            *used = u;
+            return -1;
+        }
+        dst[u++] = *src++;
+    }
+    dst[u] = '\0';
+    *used = u;
+    return 0;
+}
+
+// 追加单个字符。成功返回 0；空间不足返回 -1。
+static int safe_putc(char *dst, size_t cap, size_t *used, char c)
+{
+    size_t u = *used;
+    if (u + 1 >= cap) {
+        dst[u] = '\0';
+        *used = u;
+        return -1;
+    }
+    dst[u++] = c;
+    dst[u] = '\0';
+    *used = u;
+    return 0;
 }
