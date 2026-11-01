@@ -313,7 +313,8 @@ int main (int argc, char *argv[])
 
     // 运行第二遍扫描
     rewind(tmp);
-    FILE *out = fopen(output, "w");
+    // 【修改】使用 "wb" 二进制模式打开，防止 Windows 破坏字节
+    FILE *out = fopen(output, "wb");
     if (!out) {
         fprintf(stderr, RED"Error:"RESET" Cannot create %s\n", output);
         fclose(tmp);
@@ -321,6 +322,16 @@ int main (int argc, char *argv[])
         return 1;
     }
     pass2(tmp, out, input);
+    
+    // 【新增】检查关闭前是否有写入错误（如磁盘满）
+    if (ferror(out)) {
+        fprintf(stderr, RED"Error:"RESET" Failed to write to %s\n", output);
+        fclose(out);
+        fclose(tmp);
+        fclose(input_file);
+        return 1;
+    }
+
     fclose(out);
     
     fclose(input_file);
@@ -1235,8 +1246,12 @@ int pass2(FILE *in, FILE *out, const char *filename)
         // 写入输出
         uint8_t hi = (code_val >> 8) & 0xFF;
         uint8_t lo = code_val & 0xFF;
-        fwrite(&hi, 1, 1, out);
-        fwrite(&lo, 1, 1, out);
+
+        // 检查写入结果
+        if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
+                      LEVEL_ERROR, "Failed to write machine code to output file.");
+        }
 
         addr++;
     }
