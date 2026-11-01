@@ -625,6 +625,19 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
         if (*p == ',') p++;
     }
     
+    // 【新增】检查宏调用参数个数是否匹配
+    if (arg_count != m->param_count) {
+        // 由于这是在预处理阶段，我们还没有记录当前行属于哪个文件，
+        // 但错误是在当前文本行产生的，直接借用预处理阶段的上下文报错即可
+        fprintf(stderr, "Line %d :\n", line_num);
+        fprintf(stderr, "\t%s\n", line);
+        fprintf(stderr, RED"Error:"RESET" Macro '%s' expects %d arguments, but got %d.\n", 
+                m->name, m->param_count, arg_count);
+        // 为了格式统一，我们调用 error_msg，但由于不清楚前导缩进，只能粗略对齐
+        // 更好的做法是把上下文传进来，或者干脆直接打印报错然后退出。
+        exit(1);
+    }
+    
     char value_copy[MAX_VALUE];
     strcpy(value_copy, m->value);
     
@@ -644,7 +657,6 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
                 if (replace_all_macros(expanded) == 0) break;
             }
             
-            // 关键修改：报错指向宏定义的位置
             fprintf(out, ".file \"%s\"\n", m->source_file);
             fprintf(out, ".line %d\n", m->source_line);
             
@@ -654,8 +666,6 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
         }
         segment = strtok(NULL, ";");
     }
-    
-    // 此时调用处的文件由 preprocess 的下一次 .file 覆盖，不需要在这里处理
     
     return written;
 }
