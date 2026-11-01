@@ -282,7 +282,7 @@ int main (int argc, char *argv[])
     if (input == NULL)
     {
         fprintf(stderr, RED"Error:"RESET" No input file specified\n");
-        fprintf(stderr, "Use "YELLOW"%s --help"RESET" for usage information.\n", argv[0]);
+        fprintf(stderr, "  Use "YELLOW"%s --help"RESET" for usage information.\n", argv[0]);
         return 1;
     }
 
