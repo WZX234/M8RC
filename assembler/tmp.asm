@@ -10,7 +10,8 @@ CMPI R0, 8
 .line 4
 JE loop1
 .line 5
-.line 5
+.file "test_include.asm"
+.line 1
 ADDI R0, 1, R0 :NOP
 .line 6
 JUMP loop2

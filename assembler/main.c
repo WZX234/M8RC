@@ -100,6 +100,8 @@ typedef struct {
     char params[MAX_PARAMS][MAX_NAME]; // 参数名，如 ["r"]
     int param_count;                   // 参数个数，如 1
     char value[MAX_VALUE];             // 宏值，如 "ADDI r, 1"
+    char source_file[256];             // 宏定义所在的文件
+    int source_line;                   // 宏定义所在的行
 } Macro;
 
 // 标签结构体
@@ -109,7 +111,7 @@ typedef struct {
 } Label;
 
 char  *trim(char *s);
-void  handle_define(const char *line);
+void  handle_define(const char *line, const char *current_file, int current_line_num);
 Macro *find_macro(const char *name);
 void  replace_word(char *result, const char *word, const char *replacement);
 void  preprocess(FILE *in, FILE *out, const char *filename);
@@ -357,7 +359,7 @@ void preprocess(FILE *in, FILE *out, const char *filename)
         // 处理宏定义和包含文件
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
-                handle_define(trimmed);
+                handle_define(trimmed, filename, line_num); // 【修改】传入文件与行号
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
@@ -369,7 +371,6 @@ void preprocess(FILE *in, FILE *out, const char *filename)
         // 宏展开
         int r = expand_line(trimmed, out, line_num);
         if (r < 0) {
-            // 不是宏，原样输出
             fputs(trimmed, out);
             fputc('\n', out);
         }
@@ -377,7 +378,7 @@ void preprocess(FILE *in, FILE *out, const char *filename)
 }
 
 // 处理宏定义
-void handle_define(const char *line)
+void handle_define(const char *line, const char *current_file, int current_line_num)
 {
     const char *p = line + 7;  // 跳过 ".define"
     while (*p == ' ' || *p == '\t') p++;
@@ -414,8 +415,12 @@ void handle_define(const char *line)
     // 跳过空白
     while (*p == ' ' || *p == '\t') p++;
     
-    // 提取宏值(整行，含 ; 分隔的多条指令)
+    // 提取宏值
     strcpy(m->value, p);
+    
+    // 记录宏定义所在的文件和行号
+    strcpy(m->source_file, current_file);
+    m->source_line = current_line_num;
     
     macro_count++;
 }
@@ -435,7 +440,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
         return 0;
     }
     
-    // 3. 循环包含检查（只检查当前递归路径）
+    // 3. 循环包含检查
     for (int i = 0; i < include_count; i++) {
         if (strcmp(included_files[i], filename) == 0) {
             fprintf(stderr, RED"Error:"RESET" Circular include: %s\n", filename);
@@ -443,7 +448,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
         }
     }
     
-    // 4. 记录已包含文件（压栈）
+    // 4. 记录已包含文件
     if (include_count >= MAX_INCLUDES) {
         fprintf(stderr, RED"Error:"RESET" Too many includes\n");
         return 0;
@@ -455,7 +460,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
     FILE *inc = fopen(filename, "r");
     if (!inc) {
         fprintf(stderr, RED"Error:"RESET" Cannot open include: %s\n", filename);
-        include_count--;  // 回退记录
+        include_count--;
         return 0;
     }
     
@@ -469,7 +474,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
         line_num++;
         fprintf(out, ".line %d\n", line_num);
 
-        // 检测截断
+        // 截断检测与去换行
         size_t len = strlen(buf);
         if (len == sizeof(buf) - 1 && buf[len-1] != '\n') {
             fprintf(stderr, RED"Error:"RESET" Line too long in %s\n", filename);
@@ -477,22 +482,18 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
             while ((c = fgetc(inc)) != '\n' && c != EOF);
             continue;
         }
-        
-        // 去换行
         buf[strcspn(buf, "\r\n")] = '\0';
         
-        // 去注释
+        // 去注释与空格
         char *comment = strchr(buf, '#');
         if (comment) *comment = '\0';
-        
-        // 去空格
         char *trimmed = trim(buf);
         if (trimmed[0] == '\0') continue;
         
         // 预处理指令
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
-                handle_define(trimmed);
+                handle_define(trimmed, filename, line_num); // 【修改】传入包含文件与行号
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
@@ -670,8 +671,10 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
                 if (replace_all_macros(expanded) == 0) break;
             }
             
-            // 展开生成的每一条指令，都打上触发宏那一行的行号
-            fprintf(out, ".line %d\n", line_num);
+            // 【修改】此处输出宏定义所在的文件与行号
+            fprintf(out, ".file \"%s\"\n", m->source_file);
+            fprintf(out, ".line %d\n", m->source_line);
+            
             fputs(expanded, out);
             fputc('\n', out);
             written++;
