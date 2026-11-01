@@ -146,7 +146,7 @@ int   parse_immediate(const char *s, const char *filename, int line_num,
                     const char *source, int col);
 const char *resolve_loop_jump(const char *mnemonic, const char *operand,
                               int current_addr);
-int encode(Instruction *inst, const char *operands, int addr, int base,
+int   encode(Instruction *inst, const char *operands, int addr, int base,
            const char *filename, int line_num, const char *source,
            uint16_t *code_out);
 int  pass2(FILE *in, const char *filename);
@@ -157,21 +157,22 @@ int  is_absolute_path(const char *path);
 int  is_path_sep(char c);
 void unify_separators(char *path);
 int  normalize_path(const char *in, char *out, size_t out_size);
-void get_directory(const char *file_path, char *dir, size_t dir_size);
-void resolve_include_path(const char *base_dir, const char *include_name, char *out_path, size_t out_size);
+int  get_directory(const char *file_path, char *dir, size_t dir_size);
+int resolve_include_path(const char *base_dir, const char *include_name,
+                         char *out_path, size_t out_size);
 
 int  preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir);
 int  handle_include(const char *line, FILE *out, int depth, const char *caller_file, const char *base_dir);
 static int  ensure_word_capacity(int addr);
 static int  record_word(int addr, uint16_t code);
 static void free_words(void);
-static int write_bin(FILE *out);
-static int write_hex(FILE *out);
-static int write_logisim(FILE *out);
-static int write_output(FILE *out, const char *format);
-static int is_valid_format(const char *format);
-static int safe_append(char *dst, size_t cap, size_t *used, const char *src);
-static int safe_putc(char *dst, size_t cap, size_t *used, char c);
+static int  write_bin(FILE *out);
+static int  write_hex(FILE *out);
+static int  write_logisim(FILE *out);
+static int  write_output(FILE *out, const char *format);
+static int  is_valid_format(const char *format);
+static int  safe_append(char *dst, size_t cap, size_t *used, const char *src);
+static int  safe_putc(char *dst, size_t cap, size_t *used, char c);
 
 //=========================== 全局变量 ===========================
 
@@ -347,10 +348,16 @@ int main(int argc, char *argv[])
     //=========================================== 文件打开 =========================================
 
     char abs_input_path[1024];
-    normalize_path(input, abs_input_path, sizeof(abs_input_path));
+    if (normalize_path(input, abs_input_path, sizeof(abs_input_path)) != 0) {
+        fprintf(stderr, RED "Error:" RESET " Input path too long or invalid: %s\n", input);
+        return 1;
+    }
 
     char base_dir[1024];
-    get_directory(abs_input_path, base_dir, sizeof(base_dir));
+    if (get_directory(abs_input_path, base_dir, sizeof(base_dir)) != 0) {
+        fprintf(stderr, RED "Error:" RESET " Input directory path too long.\n");
+        return 1;
+    }
 
     FILE *input_file = fopen(abs_input_path, "r");
     if (!input_file) {
@@ -594,7 +601,12 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
     
     // 解析包含文件的完整路径（以调用者所在目录为基准）
     char resolved_path[1024];
-    resolve_include_path(base_dir, include_name, resolved_path, sizeof(resolved_path));
+    if (resolve_include_path(base_dir, include_name,
+                             resolved_path, sizeof(resolved_path)) != 0) {
+        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR,
+                  "Include path too long or invalid: %s", include_name);
+        return 0;
+    }
     
     // 循环包含检测（用完整路径比较，彻底解决 ./a.asm 和 a.asm 冲突）
     for (int i = 0; i < include_count; i++) {
@@ -620,7 +632,13 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
     
     // 提取被包含文件所在的目录，供嵌套包含使用
     char new_base_dir[1024];
-    get_directory(resolved_path, new_base_dir, sizeof(new_base_dir));
+    if (get_directory(resolved_path, new_base_dir, sizeof(new_base_dir)) != 0) {
+        error_msg(resolved_path, 0, line, 0, strlen(line), LEVEL_ERROR,
+                  "Included file directory path too long.");
+        fclose(inc);
+        include_count--;
+        return 0;
+    }
     
     // 记录被包含文件的绝对（或规范）路径
     fprintf(out, ".file \"%s\"\n", resolved_path);
@@ -1697,27 +1715,33 @@ void unify_separators(char *path) {
     }
 }
 
-// 规范化路径：处理 ./、../ 和重复的斜杠
-// 返回 0 成功，-1 失败
-int normalize_path(const char *in, char *out, size_t out_size) {
+// 规范化路径：处理 ./、../ 和重复的斜杠。
+// 成功返回 0；路径过深、过长或参数非法返回 -1。
+int normalize_path(const char *in, char *out, size_t out_size)
+{
     if (!in || !out || out_size == 0) return -1;
-    
+
     if (in[0] == '\0') {
         out[0] = '\0';
         return 0;
     }
 
     char temp[1024];
-    safe_strcpy(temp, in, sizeof(temp));
+    if (safe_strcpy(temp, in, sizeof(temp)) != 0) {
+        out[0] = '\0';
+        return -1;   // 输入本身超过 temp 容量
+    }
     unify_separators(temp);
 
-    char *segments[256];
+    // 段数组带上限
+    #define MAX_PATH_SEGS 256
+    char *segments[MAX_PATH_SEGS];
     int seg_count = 0;
+
     char *p = temp;
     int is_abs = (temp[0] == '/');
     int drive_len = 0;
 
-    // 处理 Windows 盘符
     if (strlen(temp) > 1 && temp[1] == ':') {
         drive_len = 2;
         p = temp + 2;
@@ -1732,6 +1756,10 @@ int normalize_path(const char *in, char *out, size_t out_size) {
         if (is_path_sep(*p)) {
             *p = '\0';
             if (token[0] != '\0') {
+                if (seg_count >= MAX_PATH_SEGS) {
+                    out[0] = '\0';
+                    return -1;
+                }
                 segments[seg_count++] = token;
             }
             token = p + 1;
@@ -1739,11 +1767,15 @@ int normalize_path(const char *in, char *out, size_t out_size) {
         p++;
     }
     if (token[0] != '\0') {
+        if (seg_count >= MAX_PATH_SEGS) {
+            out[0] = '\0';
+            return -1;
+        }
         segments[seg_count++] = token;
     }
 
     // 处理 . 和 ..
-    char *result[256];
+    char *result[MAX_PATH_SEGS];
     int res_count = 0;
 
     for (int i = 0; i < seg_count; i++) {
@@ -1753,66 +1785,138 @@ int normalize_path(const char *in, char *out, size_t out_size) {
             if (res_count > 0 && strcmp(result[res_count - 1], "..") != 0) {
                 res_count--;
             } else if (!is_abs && drive_len == 0) {
+                if (res_count >= MAX_PATH_SEGS) {
+                    out[0] = '\0';
+                    return -1;
+                }
                 result[res_count++] = "..";
             }
         } else {
+            if (res_count >= MAX_PATH_SEGS) {
+                out[0] = '\0';
+                return -1;
+            }
             result[res_count++] = segments[i];
         }
     }
 
-    // 重新拼接
+    // 重新拼接：用"实际写入长度"，检测截断
     out[0] = '\0';
     size_t len = 0;
+    int truncated = 0;
+
+    // 计算"想写"的长度，但只复制能放下的部分
+    #define APPEND_STR(s) do {                                       \
+        int _n = snprintf(out + len, out_size - len, "%s", (s));     \
+        if (_n < 0) { out[0] = '\0'; return -1; }                    \
+        if ((size_t)_n >= out_size - len) { truncated = 1; len = out_size - 1; } \
+        else { len += (size_t)_n; }                                  \
+    } while (0)
+
+    #define APPEND_CHAR(c) do {                                      \
+        int _n = snprintf(out + len, out_size - len, "%c", (c));     \
+        if (_n < 0) { out[0] = '\0'; return -1; }                    \
+        if ((size_t)_n >= out_size - len) { truncated = 1; len = out_size - 1; } \
+        else { len += (size_t)_n; }                                  \
+    } while (0)
 
     if (drive_len > 0) {
-        len += snprintf(out + len, out_size - len, "%.*s", drive_len, temp);
-        if (res_count > 0) len += snprintf(out + len, out_size - len, "/");
+        // drive_len 是 2，temp 前 2 字节是盘符
+        char drive[3];
+        drive[0] = temp[0];
+        drive[1] = temp[1];
+        drive[2] = '\0';
+        APPEND_STR(drive);
+        if (res_count > 0) APPEND_CHAR('/');
     } else if (is_abs) {
-        len += snprintf(out + len, out_size - len, "/");
+        APPEND_CHAR('/');
     }
 
-    for (int i = 0; i < res_count; i++) {
-        len += snprintf(out + len, out_size - len, "%s", result[i]);
-        if (i < res_count - 1) {
-            len += snprintf(out + len, out_size - len, "/");
-        }
+    for (int i = 0; i < res_count && !truncated; i++) {
+        APPEND_STR(result[i]);
+        if (i < res_count - 1) APPEND_CHAR('/');
+    }
+
+    #undef APPEND_STR
+    #undef APPEND_CHAR
+
+    if (truncated) {
+        out[0] = '\0';
+        return -1;
     }
 
     if (out[0] == '\0' && is_abs) {
-        safe_strcpy(out, "/", out_size);
+        // 根路径特例
+        if (out_size < 2) { out[0] = '\0'; return -1; }
+        out[0] = '/';
+        out[1] = '\0';
     }
 
+    #undef MAX_PATH_SEGS
     return 0;
 }
 
-// 提取文件所在目录（包含末尾的斜杠）
-void get_directory(const char *file_path, char *dir, size_t dir_size) {
-    const char *last_slash = strrchr(file_path, '/');
-    const char *last_backslash = strrchr(file_path, '\\');
-    const char *last_sep = (last_slash > last_backslash) ? last_slash : last_backslash;
-    
-    if (last_sep) {
-        size_t len = last_sep - file_path + 1;
-        if (len < dir_size) {
-            strncpy(dir, file_path, len);
-            dir[len] = '\0';
-        } else {
-            dir[0] = '\0';
-        }
-    } else {
-        dir[0] = '\0';
+// 提取文件所在目录（包含末尾的斜杠）。
+// 成功返回 0；路径过长无法完整写入 dir 时返回 -1（dir 置空）。
+// 无分隔符时 dir 置空并返回 0（表示"当前目录"）。
+int get_directory(const char *file_path, char *dir, size_t dir_size)
+{
+    if (!file_path || !dir || dir_size == 0) {
+        if (dir && dir_size > 0) dir[0] = '\0';
+        return -1;
     }
+
+    const char *last_slash     = strrchr(file_path, '/');
+    const char *last_backslash = strrchr(file_path, '\\');
+
+    const char *last_sep = NULL;
+    if (last_slash && last_backslash) {
+        // 两者都非 NULL：比较它们在 file_path 内的偏移，避免比较无关指针
+        last_sep = (last_slash > last_backslash) ? last_slash : last_backslash;
+    } else if (last_slash) {
+        last_sep = last_slash;
+    } else if (last_backslash) {
+        last_sep = last_backslash;
+    }
+
+    if (!last_sep) {
+        dir[0] = '\0';
+        return 0;
+    }
+
+    size_t len = (size_t)(last_sep - file_path) + 1;   // 含末尾分隔符
+    if (len >= dir_size) {
+        dir[0] = '\0';
+        return -1;   // 放不下，视为失败
+    }
+
+    memcpy(dir, file_path, len);
+    dir[len] = '\0';
+    return 0;
 }
 
-// 将相对路径拼接到基准目录下
-void resolve_include_path(const char *base_dir, const char *include_name, char *out_path, size_t out_size) {
+// 将相对路径拼接到基准目录下。
+// 成功返回 0；失败（路径过长、normalize 失败）返回 -1，out_path 置空。
+int resolve_include_path(const char *base_dir, const char *include_name,
+                         char *out_path, size_t out_size)
+{
+    if (!out_path || out_size == 0) return -1;
+    out_path[0] = '\0';
+
+    if (!include_name) return -1;
+
     if (is_absolute_path(include_name)) {
-        normalize_path(include_name, out_path, out_size);
-    } else {
-        char temp[1024];
-        snprintf(temp, sizeof(temp), "%s%s", base_dir, include_name);
-        normalize_path(temp, out_path, out_size);
+        return normalize_path(include_name, out_path, out_size);
     }
+
+    char temp[1024];
+    int n = snprintf(temp, sizeof(temp), "%s%s",
+                     base_dir ? base_dir : "", include_name);
+    if (n < 0 || (size_t)n >= sizeof(temp)) {
+        return -1;   // 拼接后超长
+    }
+
+    return normalize_path(temp, out_path, out_size);
 }
 
 // 确保容量足够存放第 addr 条指令
