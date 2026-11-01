@@ -1,5 +1,6 @@
 .include "test_include.asm"
 loop2:
+NN
 CMPI R0, 8
 JE loop1
 INC R0

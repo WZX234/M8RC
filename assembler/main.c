@@ -323,7 +323,6 @@ int main (int argc, char *argv[])
     pass2(tmp, out, input);
     fclose(out);
     
-    // 关闭输入文件和临时文件
     fclose(input_file);
     fclose(tmp);
     
@@ -335,31 +334,25 @@ void preprocess(FILE *in, FILE *out, const char *filename)
     char line[MAX_LINE_LENGTH];
     int line_num = 0;
 
-    // 写入初始文件标记
+    // 写入初始文件标记（原样输出）
     fprintf(out, ".file \"%s\"\n", filename);
 
     while (fgets(line, sizeof(line), in))
     {
         line_num++;
-        
-        // 写入当前行号标记
         fprintf(out, ".line %d\n", line_num);
 
-        // 去换行
         line[strcspn(line, "\r\n")] = '\0'; 
         
-        // 去注释
         char *comment = strchr(line, '#');
         if (comment) *comment = '\0'; 
 
-        // 去首尾空格
         char *trimmed = trim(line);
         if (trimmed[0] == '\0') continue;
 
-        // 处理宏定义和包含文件
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
-                handle_define(trimmed, filename, line_num); // 【修改】传入文件与行号
+                handle_define(trimmed, filename, line_num); 
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
@@ -368,7 +361,6 @@ void preprocess(FILE *in, FILE *out, const char *filename)
             }
         }
 
-        // 宏展开
         int r = expand_line(trimmed, out, line_num);
         if (r < 0) {
             fputs(trimmed, out);
@@ -383,7 +375,6 @@ void handle_define(const char *line, const char *current_file, int current_line_
     const char *p = line + 7;  // 跳过 ".define"
     while (*p == ' ' || *p == '\t') p++;
     
-    // 提取宏名
     char name[MAX_NAME];
     int i = 0;
     while (*p && *p != '(' && *p != ' ' && *p != '\t' && i < MAX_NAME-1) {
@@ -395,7 +386,6 @@ void handle_define(const char *line, const char *current_file, int current_line_
     strcpy(m->name, name);
     m->param_count = 0;
     
-    // 解析参数
     if (*p == '(') {
         p++;
         while (*p && *p != ')') {
@@ -412,35 +402,31 @@ void handle_define(const char *line, const char *current_file, int current_line_
         if (*p == ')') p++;
     }
     
-    // 跳过空白
     while (*p == ' ' || *p == '\t') p++;
-    
-    // 提取宏值
     strcpy(m->value, p);
     
-    // 记录宏定义所在的文件和行号
     strcpy(m->source_file, current_file);
     m->source_line = current_line_num;
     
     macro_count++;
 }
 
-int handle_include(const char *line, FILE *out, int depth, const char *current_filename)
+// caller_file 是包含此文件的上一级文件（例如 test.asm）
+int handle_include(const char *line, FILE *out, int depth, const char *caller_file)
 {
-    // 1. 深度检查
     if (depth > 16) {
         fprintf(stderr, RED"Error:"RESET" Include depth exceeded\n");
         return 0;
     }
     
-    // 2. 解析文件名
+    // 原样解析出的文件名
     char filename[256] = "";
     if (sscanf(line, ".include \"%[^\"]\"", filename) != 1) {
         fprintf(stderr, RED"Error:"RESET" Invalid include syntax: %s\n", line);
         return 0;
     }
     
-    // 3. 循环包含检查
+    // 循环包含检查（原样比较）
     for (int i = 0; i < include_count; i++) {
         if (strcmp(included_files[i], filename) == 0) {
             fprintf(stderr, RED"Error:"RESET" Circular include: %s\n", filename);
@@ -448,7 +434,6 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
         }
     }
     
-    // 4. 记录已包含文件
     if (include_count >= MAX_INCLUDES) {
         fprintf(stderr, RED"Error:"RESET" Too many includes\n");
         return 0;
@@ -456,7 +441,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
     strcpy(included_files[include_count], filename);
     include_count++;
     
-    // 5. 打开文件
+    // 打开文件
     FILE *inc = fopen(filename, "r");
     if (!inc) {
         fprintf(stderr, RED"Error:"RESET" Cannot open include: %s\n", filename);
@@ -464,17 +449,15 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
         return 0;
     }
     
-    // 6. 切换文件标记
+    // 切换文件标记（原样输出包含名）
     fprintf(out, ".file \"%s\"\n", filename);
 
-    // 7. 逐行处理
     char buf[MAX_LINE];
     int line_num = 0;
     while (fgets(buf, sizeof(buf), inc)) {
         line_num++;
         fprintf(out, ".line %d\n", line_num);
 
-        // 截断检测与去换行
         size_t len = strlen(buf);
         if (len == sizeof(buf) - 1 && buf[len-1] != '\n') {
             fprintf(stderr, RED"Error:"RESET" Line too long in %s\n", filename);
@@ -484,25 +467,24 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
         }
         buf[strcspn(buf, "\r\n")] = '\0';
         
-        // 去注释与空格
         char *comment = strchr(buf, '#');
         if (comment) *comment = '\0';
         char *trimmed = trim(buf);
         if (trimmed[0] == '\0') continue;
         
-        // 预处理指令
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
-                handle_define(trimmed, filename, line_num); // 【修改】传入包含文件与行号
+                // 记录宏定义时，原样传入包含文件名
+                handle_define(trimmed, filename, line_num);
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
+                // 递归包含时，原样传入当前包含名
                 handle_include(trimmed, out, depth + 1, filename);
                 continue;
             }
         }
         
-        // 宏展开
         int r = expand_line(trimmed, out, line_num);
         if (r < 0) {
             fputs(trimmed, out);
@@ -512,12 +494,10 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
     
     fclose(inc);
     
-    // 8. 恢复之前的文件标记
-    fprintf(out, ".file \"%s\"\n", current_filename);
+    // 恢复之前的文件标记（原样恢复 caller_file）
+    fprintf(out, ".file \"%s\"\n", caller_file);
 
-    // 9. 弹栈
     include_count--;
-    
     return 1;
 }
 
@@ -528,7 +508,6 @@ int handle_include(const char *line, FILE *out, int depth, const char *current_f
 //   -1：不是宏，未写入
 int expand_line(const char *line, FILE *out, int line_num)
 {
-    // 提取第一个词
     char first[MAX_NAME];
     int i = 0;
     while (line[i] && line[i] != ' ' && line[i] != '\t' && i < MAX_NAME-1) {
@@ -537,15 +516,12 @@ int expand_line(const char *line, FILE *out, int line_num)
     }
     first[i] = '\0';
     
-    // 查找宏
     Macro *m = find_macro(first);
     
-    // 第一步：行首是带参宏
     if (m && m->param_count > 0) {
         return expand_param_macro(line, m, out, line_num);
     }
     
-    // 第二步：行首是无参宏，或普通代码
     char result[MAX_VALUE];
     strcpy(result, line);
 
@@ -556,9 +532,10 @@ int expand_line(const char *line, FILE *out, int line_num)
         total += changed;
     }
 
-    // 如果发生了替换，或者本来就是无参宏
     if (total > 0 || m) {
-        fprintf(out, ".line %d\n", line_num); // 插入行号标记
+        // 对于无参宏替换，报错位置可以保留在调用处，也可以跳回定义处。
+        // 为统一起见，这里保留在调用处，因为行内替换通常不会写错。
+        fprintf(out, ".line %d\n", line_num); 
         fputs(result, out);
         fputc('\n', out);
         return 1;
@@ -627,12 +604,10 @@ char *trim(char *s) {
 // 展开带参宏
 int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
 {
-    // 跳过宏名
     const char *p = line;
     while (*p && *p != ' ' && *p != '\t') p++;
     while (*p == ' ' || *p == '\t') p++;
     
-    // 解析参数
     char args[MAX_PARAMS][MAX_NAME];
     int arg_count = 0;
     while (*p && arg_count < MAX_PARAMS) {
@@ -641,7 +616,6 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
             args[arg_count][j++] = *p++;
         }
         args[arg_count][j] = '\0';
-        // 去掉尾部空格
         while (j > 0 && args[arg_count][j-1] == ' ') {
             args[arg_count][--j] = '\0';
         }
@@ -649,7 +623,6 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
         if (*p == ',') p++;
     }
     
-    // 按 ; 切分宏值，逐条展开
     char value_copy[MAX_VALUE];
     strcpy(value_copy, m->value);
     
@@ -661,17 +634,15 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
             char expanded[MAX_VALUE];
             strcpy(expanded, trimmed_seg);
             
-            // 替换参数
             for (int k = 0; k < m->param_count && k < arg_count; k++) {
                 replace_word(expanded, m->params[k], args[k]);
             }
             
-            // 替换无参宏（参数值里可能含宏）
             for (int pass = 0; pass < 32; pass++) {
                 if (replace_all_macros(expanded) == 0) break;
             }
             
-            // 【修改】此处输出宏定义所在的文件与行号
+            // 关键修改：报错指向宏定义的位置
             fprintf(out, ".file \"%s\"\n", m->source_file);
             fprintf(out, ".line %d\n", m->source_line);
             
@@ -681,6 +652,8 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
         }
         segment = strtok(NULL, ";");
     }
+    
+    // 此时调用处的文件由 preprocess 的下一次 .file 覆盖，不需要在这里处理
     
     return written;
 }
