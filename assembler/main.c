@@ -120,6 +120,16 @@ typedef struct {
     int addr;             // 标签地址，如 0x100
 } Label;
 
+// listing 记录
+typedef struct {
+    int      valid;             // 1 = 成功产生机器码；0 = 标签行/错误行
+    int      addr;              // 指令序号（字节地址 = addr * 2）
+    uint16_t code;              // valid 时有效
+    char     file[256];         // 该行所属文件（来自 .file）
+    int      line;              // 该行行号（来自 .line）
+    char     source[MAX_LINE];  // 源码原文（保留注释）
+} ListingEntry;
+
 void  cleanup_tmp(void);
 char  *trim(char *s);
 void  handle_define(const char *line, const char *current_file, int current_line_num);
@@ -159,10 +169,10 @@ int  is_path_sep(char c);
 void unify_separators(char *path);
 int  normalize_path(const char *in, char *out, size_t out_size);
 int  get_directory(const char *file_path, char *dir, size_t dir_size);
-int resolve_include_path(const char *base_dir, const char *include_name,
+int  resolve_include_path(const char *base_dir, const char *include_name,
                          char *out_path, size_t out_size);
 int  preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir);
-int handle_include(const char *line, FILE *out, int depth,
+int  handle_include(const char *line, FILE *out, int depth,
                    const char *caller_file, int caller_line,
                    const char *base_dir);
 static int  ensure_word_capacity(int addr);
@@ -175,6 +185,14 @@ static int  write_output(FILE *out, const char *format);
 static int  is_valid_format(const char *format);
 static int  safe_append(char *dst, size_t cap, size_t *used, const char *src);
 static int  safe_putc(char *dst, size_t cap, size_t *used, char c);
+static int  ensure_listing_capacity(int need);
+static int  record_listing(int valid, int addr, uint16_t code,
+                          const char *file, int line, const char *source);
+static void free_listing(void);
+static int  write_listing_text(FILE *out);
+static int  write_listing_md(FILE *out);
+static int  write_listing(FILE *out, const char *fmt);
+static int  is_valid_listing_format(const char *fmt);
 
 //=========================== 全局变量 ===========================
 
@@ -200,6 +218,11 @@ char tmp_filename[256] = "";
 // 错误标志
 int has_error = 0;
 
+// listing 缓冲：pass2 收集，最后统一写
+static ListingEntry *g_listing = NULL;
+static int g_listing_count = 0;
+static int g_listing_cap   = 0;
+
 // 分级计数器
 int error_count       = 0;    // Error 计数器
 int warning_count     = 0;    // Warning 计数器
@@ -219,11 +242,12 @@ const char *level_colors[] = {RED, YELLOW, CYAN};
 char *source_filename = NULL;
 
 //=========================== 命令行参数 ===========================
-char *input = NULL;     // 输入文件名
-char *output = "a.out"; // 输出文件名
-char *format = "bin";   // 输出格式
-char *listing = NULL;   // 汇编列表文件名
+char *input = NULL;      // 输入文件名
+char *output = "a.out";  // 输出文件名
+char *format = "bin";    // 输出格式
+char *listing = NULL;    // 汇编列表文件名
 int  quiet = 0;          // 安静模式标志
+char *listing_format = "text";     // listing 格式：text / md
 
 // 输出缓冲：pass2 收集，最后按 format 写出
 static uint16_t *g_words = NULL;   // 每条指令的机器码
@@ -252,18 +276,19 @@ int main(int argc, char *argv[])
             printf(GREEN"Usage:"RESET" %s <input_file>\n", argv[0]);
             puts(GREEN"Description:"RESET" This program is an assembler that converts assembly code into machine code.");
             puts(GREEN"Options:"RESET);
-            puts("  "YELLOW"--help, -h          "RESET" Show this help message and exit");
-            puts("  "YELLOW"--version, -v       "RESET" Show the version of the assembler and exit");
-            puts("  "YELLOW"--input, -i         "RESET" Specify the input assembly file (required)");
-            puts("  "YELLOW"--output, -o        "RESET" Specify the output file (default: a.out)");
-            puts("  "YELLOW"--format, -f        "RESET" Specify the output format (default: bin)");
-            puts("  "YELLOW"--listing, -l       "RESET" Specify the listing file (optional)");
-            puts("  "YELLOW"--quiet, -q         "RESET" Enable quiet mode (suppress output messages)");
-            puts("  "YELLOW"--verbose           "RESET" Show notice-level messages");
-            puts("  "YELLOW"--no-warnings, -w   "RESET" Suppress warning and notice messages");
-            puts("  "YELLOW"--Werror            "RESET" Treat warnings as errors");
-            puts("  "YELLOW"--fatal-warnings    "RESET" Exit non-zero if any warning is emitted");
-            puts("  "YELLOW"--max-errors N      "RESET" Stop reporting after N errors (default: 100)");
+            puts("  "YELLOW"--help, -h             "RESET" Show this help message and exit");
+            puts("  "YELLOW"--version, -v          "RESET" Show the version of the assembler and exit");
+            puts("  "YELLOW"--input, -i            "RESET" Specify the input assembly file (required)");
+            puts("  "YELLOW"--output, -o           "RESET" Specify the output file (default: a.out)");
+            puts("  "YELLOW"--format, -f           "RESET" Specify the output format (default: bin)");
+            puts("  "YELLOW"--listing-format, -lf  "RESET" Listing format: text|md (default: text)");
+            puts("  "YELLOW"--listing, -l          "RESET" Specify the listing file (optional)");
+            puts("  "YELLOW"--quiet, -q            "RESET" Enable quiet mode (suppress output messages)");
+            puts("  "YELLOW"--verbose              "RESET" Show notice-level messages");
+            puts("  "YELLOW"--no-warnings, -w      "RESET" Suppress warning and notice messages");
+            puts("  "YELLOW"--Werror               "RESET" Treat warnings as errors");
+            puts("  "YELLOW"--fatal-warnings       "RESET" Exit non-zero if any warning is emitted");
+            puts("  "YELLOW"--max-errors N         "RESET" Stop reporting after N errors (default: 100)");
             puts("  "YELLOW"--max-errors-per-line N"RESET" Max errors per source line (default: 5)");
             return 0;
         }
@@ -283,6 +308,10 @@ int main(int argc, char *argv[])
         }
         else if (strcmp(argv[i], "--format") == 0 || strcmp(argv[i], "-f") == 0) {
             if (i + 1 < argc) format = argv[++i];
+            else { fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]); return 1; }
+        }
+        else if (strcmp(argv[i], "--listing-format") == 0 || strcmp(argv[i], "-lf") == 0) {
+            if (i + 1 < argc) listing_format = argv[++i];
             else { fprintf(stderr, RED"Error:"RESET" Missing argument for %s\n", argv[i]); return 1; }
         }
         else if (strcmp(argv[i], "--listing") == 0 || strcmp(argv[i], "-l") == 0) {
@@ -347,6 +376,13 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // 检查 listing 格式
+    if (listing && !is_valid_listing_format(listing_format)) {
+        fprintf(stderr, RED "Error:" RESET " Unknown listing format '%s' (supported: text, md)\n",
+                listing_format);
+        return 1;
+    }
+
     //=========================================== 文件打开 =========================================
 
     char abs_input_path[1024];
@@ -406,6 +442,7 @@ int main(int argc, char *argv[])
     if (n_words < 0) {
         fprintf(stderr, RED "Error:" RESET " Assembly failed (pass2 fatal).\n");
         free_words();
+        free_listing();
         fclose(input_file);
         fclose(tmp);
         return 1;
@@ -424,6 +461,7 @@ int main(int argc, char *argv[])
     if (!out) {
         fprintf(stderr, RED "Error:" RESET " Cannot create %s\n", output);
         free_words();
+        free_listing();
         return 1;
     }
 
@@ -432,6 +470,7 @@ int main(int argc, char *argv[])
         fclose(out);
         remove(output);
         free_words();
+        free_listing();
         return 1;
     }
 
@@ -439,10 +478,26 @@ int main(int argc, char *argv[])
         fprintf(stderr, RED "Error:" RESET " Failed to flush output file.\n");
         remove(output);
         free_words();
+        free_listing();
         return 1;
     }
 
-    // 5. 汇总
+    // 5. 写 listing（辅助产物，失败不致命）
+    if (listing != NULL) {
+        FILE *lst = fopen(listing, "w");
+        if (!lst) {
+            fprintf(stderr, YELLOW "Warning:" RESET " Cannot create listing file: %s\n", listing);
+        } else {
+            int lr = write_listing(lst, listing_format);
+            if (fclose(lst) != 0 || lr < 0) {
+                fprintf(stderr, YELLOW "Warning:" RESET " Failed to write listing file: %s\n", listing);
+            } else if (!quiet) {
+                printf("Listing written to %s (%s format)\n", listing, listing_format);
+            }
+        }
+    }
+
+    // 6. 汇总
     if (!quiet) {
         printf("%d error(s), %d warning(s), %d notice(s)\n",
             error_count, warning_count, notice_count);
@@ -459,6 +514,7 @@ int main(int argc, char *argv[])
         }
         remove(output);
         free_words();
+        free_listing();
         return 1;
     }
 
@@ -467,6 +523,7 @@ int main(int argc, char *argv[])
     }
 
     free_words();
+    free_listing();
     return 0;
 }
 
@@ -1542,7 +1599,7 @@ int encode(Instruction *inst, const char *operands, int addr, int base,
     return 0;
 }
 
-// 第二遍扫描：收集机器码到 g_words
+// 第二遍扫描：收集机器码到 g_words，并记录 listing
 // 返回处理的指令数；仅致命错误返回 -1
 int pass2(FILE *in, const char *filename)
 {
@@ -1553,7 +1610,6 @@ int pass2(FILE *in, const char *filename)
     current_line = 0;
 
     while (fgets(line, sizeof(line), in)) {
-        // 长行截断检查
         size_t len = strlen(line);
         if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
             error_msg(current_filename, current_line, line, 0, strlen(line), LEVEL_ERROR,
@@ -1590,7 +1646,13 @@ int pass2(FILE *in, const char *filename)
         if (is_label(code)) {
             char *rest = strchr(code, ':') + 1;
             rest = trim(rest);
-            if (rest[0] == '\0') continue;
+            if (rest[0] == '\0') {
+                // 纯标签行：记录地址，不占指令地址
+                if (record_listing(0, addr, 0,
+                                   current_filename, current_line, source_code) < 0)
+                    return -1;
+                continue;
+            }
             code = rest;
         }
 
@@ -1611,6 +1673,9 @@ int pass2(FILE *in, const char *filename)
         if (resolved == NULL) {
             error_msg(current_filename, current_line, source_code, 0, strlen(operands),
                       LEVEL_ERROR, "Undefined label: \"%s\".", operands);
+            if (record_listing(0, addr, 0,
+                               current_filename, current_line, source_code) < 0)
+                return -1;
             if (record_word(addr, 0x0000) < 0) return -1;
             addr++;
             continue;
@@ -1620,17 +1685,24 @@ int pass2(FILE *in, const char *filename)
         if (!inst) {
             error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
                       LEVEL_ERROR, "Unknown instruction: \"%s\".", mnemonic);
+            if (record_listing(0, addr, 0,
+                               current_filename, current_line, source_code) < 0)
+                return -1;
             if (record_word(addr, 0x0000) < 0) return -1;
             addr++;
             continue;
         }
 
         int base = operands - parse_line;
-        if (encode(inst, operands, addr, base, current_filename, current_line,
-                   source_code, &code_val) < 0) {
+        int enc_ok = (encode(inst, operands, addr, base, current_filename, current_line,
+                             source_code, &code_val) == 0);
+        if (!enc_ok) {
             code_val = 0x0000;
         }
 
+        if (record_listing(enc_ok ? 1 : 0, addr, code_val,
+                           current_filename, current_line, source_code) < 0)
+            return -1;
         if (record_word(addr, code_val) < 0) return -1;
         addr++;
     }
@@ -2078,4 +2150,134 @@ static int safe_putc(char *dst, size_t cap, size_t *used, char c)
     dst[u] = '\0';
     *used = u;
     return 0;
+}
+
+// 确保 listing 数组容量足够
+static int ensure_listing_capacity(int need)
+{
+    if (need < g_listing_cap) return 0;
+
+    int new_cap = g_listing_cap ? g_listing_cap * 2 : 256;
+    while (new_cap <= need) new_cap *= 2;
+
+    ListingEntry *p = realloc(g_listing, (size_t)new_cap * sizeof(ListingEntry));
+    if (!p) {
+        fprintf(stderr, RED "Error:" RESET " Out of memory (listing).\n");
+        return -1;
+    }
+    g_listing = p;
+    g_listing_cap = new_cap;
+    return 0;
+}
+
+// 记录一行到 listing
+// valid=1 时 code 有效；valid=0 表示标签行/错误行
+static int record_listing(int valid, int addr, uint16_t code,
+                          const char *file, int line, const char *source)
+{
+    if (ensure_listing_capacity(g_listing_count) < 0) return -1;
+
+    ListingEntry *e = &g_listing[g_listing_count];
+    e->valid = valid;
+    e->addr  = addr;
+    e->code  = code;
+    safe_strcpy(e->file, file ? file : "", sizeof(e->file));
+    e->line  = line;
+    safe_strcpy(e->source, source ? source : "", sizeof(e->source));
+
+    g_listing_count++;
+    return 0;
+}
+
+// 释放 listing 数组
+static void free_listing(void)
+{
+    free(g_listing);
+    g_listing = NULL;
+    g_listing_count = 0;
+    g_listing_cap = 0;
+}
+
+// 普通文本 listing：与 MASM/NASM 风格一致的三列 + file/line
+static int write_listing_text(FILE *out)
+{
+    if (fprintf(out, "addr  code  line  file                    source\n") < 0)
+        return -1;
+
+    for (int i = 0; i < g_listing_count; i++) {
+        ListingEntry *e = &g_listing[i];
+
+        // addr（字节地址）
+        if (fprintf(out, "%04x  ", e->addr * INSTRUCTION_BYTES) < 0) return -1;
+
+        // code
+        if (e->valid) {
+            if (fprintf(out, "%04x  ", e->code) < 0) return -1;
+        } else {
+            if (fprintf(out, "----  ") < 0) return -1;
+        }
+
+        // line
+        if (fprintf(out, "%05d ", e->line) < 0) return -1;
+
+        // file（定宽 24，超长截断）
+        char filebuf[25];
+        if (strlen(e->file) <= 24) {
+            snprintf(filebuf, sizeof(filebuf), "%-24s", e->file);
+        } else {
+            snprintf(filebuf, sizeof(filebuf), "%.21s..  ", e->file);
+        }
+        if (fputs(filebuf, out) == EOF) return -1;
+
+        // source
+        if (fprintf(out, "%s\n", e->source) < 0) return -1;
+    }
+    return 0;
+}
+
+// Markdown 表格 listing：source 中的 '|' 需转义
+static int write_listing_md(FILE *out)
+{
+    if (fprintf(out, "| addr | code | line | file | source |\n") < 0) return -1;
+    if (fprintf(out, "|------|------|------|------|--------|\n") < 0) return -1;
+
+    for (int i = 0; i < g_listing_count; i++) {
+        ListingEntry *e = &g_listing[i];
+
+        if (fprintf(out, "| %04x | ", e->addr * INSTRUCTION_BYTES) < 0) return -1;
+
+        if (e->valid) {
+            if (fprintf(out, "%04x | ", e->code) < 0) return -1;
+        } else {
+            if (fprintf(out, "---- | ") < 0) return -1;
+        }
+
+        if (fprintf(out, "%d | %s | ", e->line, e->file) < 0) return -1;
+
+        // source 中的 '|' 转义为 '\|'
+        for (const char *p = e->source; *p; p++) {
+            if (*p == '|') {
+                if (fputs("\\|", out) == EOF) return -1;
+            } else {
+                if (fputc(*p, out) == EOF) return -1;
+            }
+        }
+        if (fputs(" |\n", out) == EOF) return -1;
+    }
+    return 0;
+}
+
+static int write_listing(FILE *out, const char *fmt)
+{
+    if (strcmp(fmt, "text") == 0) {
+        return write_listing_text(out);
+    } else if (strcmp(fmt, "md") == 0) {
+        return write_listing_md(out);
+    }
+    return -1;
+}
+
+static int is_valid_listing_format(const char *fmt)
+{
+    return strcmp(fmt, "text") == 0 || strcmp(fmt, "md") == 0;
 }
