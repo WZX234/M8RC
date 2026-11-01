@@ -146,6 +146,7 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
 int  pass2(FILE *in, FILE *out, const char *filename);
 int  is_backward_jump(const char *mnemonic);
 int  safe_strcpy(char *dest, const char *src, size_t dest_size);
+int is_valid_identifier(const char *s);
 
 //=========================== 全局变量 ===========================
 
@@ -850,19 +851,19 @@ int pass1(FILE *in)
 // 检查是否是标签行
 // 格式：LABEL: 或 LABEL:
 int is_label(const char *line) {
-    // 找冒号
     const char *colon = strchr(line, ':');
     if (!colon) return 0;
-    
-    // 冒号前必须是合法标识符
-    for (const char *p = line; p < colon; p++) {
-        if (!isalnum((unsigned char)*p) && *p != '_') return 0;
-    }
-    
-    // 冒号前不能为空
     if (colon == line) return 0;
     
-    return 1;
+    // 提取冒号前的部分
+    char name[MAX_NAME];
+    int len = colon - line;
+    if (len >= MAX_NAME) return 0;
+    strncpy(name, line, len);
+    name[len] = '\0';
+    
+    // 统一标识符规则
+    return is_valid_identifier(name);
 }
 
 // 提取标签名
@@ -1058,8 +1059,15 @@ const char *resolve_loop_jump(const char *mnemonic, const char *operand,
     
     for (int i = 0; i < 4; i++) {
         if (strcmp(mnemonic, loop_jumps[i].loop_form) == 0) {
+            // 如果操作数不是合法标识符，说明是立即数，不需要转换
+            if (!is_valid_identifier(operand)) {
+                return mnemonic;
+            }
+            
             int target = find_label(operand);
-            if (target < 0) return NULL;
+            if (target < 0) {
+                return NULL; // 未定义标签
+            }
             
             if (target >= current_addr) {
                 return loop_jumps[i].forward;
@@ -1154,7 +1162,7 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
         case FMT_IMM8:
         {
             int imm;
-            if (isalpha((unsigned char)args[0][0])) {
+            if (is_valid_identifier(args[0])) {
                 int target = find_label(args[0]);
                 if (target < 0) {
                     error_msg(filename, line_num, source, cols[0], strlen(args[0]),
@@ -1206,7 +1214,7 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
         {
             int rd = parse_register(args[1], filename, line_num, source, cols[1]);
             int imm;
-            if (isalpha((unsigned char)args[0][0])) {
+            if (is_valid_identifier(args[0])) {
                 int target = find_label(args[0]);
                 if (target < 0) {
                     error_msg(filename, line_num, source, cols[0], strlen(args[0]),
@@ -1268,6 +1276,7 @@ int pass2(FILE *in, FILE *out, const char *filename)
     while (fgets(line, sizeof(line), in)) {
         tmp_line++;
         
+        // 长行截断检查
         size_t len = strlen(line);
         if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
             error_msg(current_filename, current_line, line, 0, strlen(line), LEVEL_ERROR,
@@ -1280,6 +1289,7 @@ int pass2(FILE *in, FILE *out, const char *filename)
 
         if (trimmed[0] == '\0') continue;
 
+        // 处理 .file 和 .line 标记
         if (strncmp(trimmed, ".file \"", 7) == 0) {
             sscanf(trimmed, ".file \"%[^\"]\"", current_filename);
             continue;
@@ -1290,9 +1300,11 @@ int pass2(FILE *in, FILE *out, const char *filename)
             continue;
         }
 
+        // 保留原始代码行用于报错对齐
         char source_code[MAX_LINE];
         safe_strcpy(source_code, line, MAX_LINE);
         
+        // 用于解析的备份（去注释）
         char parse_line[MAX_LINE];
         safe_strcpy(parse_line, line, MAX_LINE);
         char *comment = strchr(parse_line, '#');
@@ -1301,6 +1313,7 @@ int pass2(FILE *in, FILE *out, const char *filename)
         char *code = trim(parse_line);
         if (code[0] == '\0') continue;
 
+        // 剥离标签
         if (is_label(code)) {
             char *rest = strchr(code, ':') + 1;
             rest = trim(rest);
@@ -1308,39 +1321,49 @@ int pass2(FILE *in, FILE *out, const char *filename)
             code = rest;
         }
 
+        // 提取助记符
         char mnemonic[MAX_NAME];
         int i = 0;
-        while (code[i] && code[i] != ' ' && code[i] != '\t' && i < MAX_NAME-1) {
+        while (code[i] && code[i] != ' ' && code[i] != '\t' && i < MAX_NAME - 1) {
             mnemonic[i] = code[i];
             i++;
         }
         mnemonic[i] = '\0';
 
+        // 提取操作数
         const char *operands = code + i;
         while (*operands == ' ' || *operands == '\t') operands++;
 
+        // 检查 loop 形式，并统一标识符判断
         const char *resolved = resolve_loop_jump(mnemonic, operands, addr);
         if (resolved == NULL) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR, "Undefined label: %s", operands);
+            error_msg(current_filename, current_line, source_code, 0, strlen(operands), LEVEL_ERROR,
+                      "Undefined label: \"%s\".", operands);
             return -1;
         }
 
+        // 查找指令
         Instruction *inst = find_instruction(resolved);
         if (!inst) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR, "Unknown instruction: %s", mnemonic);
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR,
+                      "Unknown instruction: \"%s\".", mnemonic);
             return -1;
         }
 
+        // 计算操作数在源代码中的偏移
         int base = operands - parse_line;
 
+        // 编码
         uint16_t code_val = encode(inst, operands, addr, base, current_filename, current_line, source_code);
-        if (has_error) return -1; // 编码失败
+        if (has_error) return -1;
 
+        // 写入机器码（大端序）
         uint8_t hi = (code_val >> 8) & 0xFF;
         uint8_t lo = code_val & 0xFF;
 
         if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR, "Failed to write machine code to output file.");
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR,
+                      "Failed to write machine code to output file.");
             return -1;
         }
 
@@ -1379,12 +1402,38 @@ int safe_strcpy(char *dest, const char *src, size_t dest_size) {
 // 添加标签
 void add_label(const char *name, int addr)
 {
+    if (!is_valid_identifier(name)) {
+        error_msg(current_filename, current_line, name, 0, strlen(name), LEVEL_ERROR,
+                  "Invalid label name: \"%s\".", name);
+        return;
+    }
+    
     if (label_count >= MAX_LABELS) {
         error_msg(current_filename, current_line, name, 0, strlen(name), LEVEL_ERROR,
                   "Too many labels (max %d).", MAX_LABELS);
         return;
     }
+    
+    // 重复检测
+    for (int i = 0; i < label_count; i++) {
+        if (strcmp(labels[i].name, name) == 0) {
+            error_msg(current_filename, current_line, name, 0, strlen(name), LEVEL_ERROR,
+                      "Duplicate label definition: \"%s\".", name);
+            return;
+        }
+    }
+    
     safe_strcpy(labels[label_count].name, name, MAX_NAME);
     labels[label_count].addr = addr;
     label_count++;
+}
+
+// 检查是否是合法标识符
+int is_valid_identifier(const char *s) {
+    if (!s || !*s) return 0;
+    if (!isalpha((unsigned char)*s) && *s != '_') return 0;
+    for (const char *p = s + 1; *p; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '_') return 0;
+    }
+    return 1;
 }
