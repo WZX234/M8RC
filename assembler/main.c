@@ -132,7 +132,7 @@ char  *extract_label(const char *line);
 void  error_msg(const char *filename, int line_num, const char *source,
                int col, int len, int level, const char *fmt, ...);
 Instruction *find_instruction(const char *mnemonic);
-void parse_operands(const char *s, int base, const char *source,
+void  parse_operands(const char *s, int base, const char *source,
                     char args[MAX_PARAMS][MAX_NAME], int cols[MAX_PARAMS],
                     int *count);
 int   parse_register(const char *s, const char *filename, int line_num,
@@ -143,8 +143,9 @@ const char *resolve_loop_jump(const char *mnemonic, const char *operand,
                               int current_addr);
 uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
                 const char *filename, int line_num, const char *source);
-int   pass2(FILE *in, FILE *out, const char *filename);
-int is_backward_jump(const char *mnemonic);
+int  pass2(FILE *in, FILE *out, const char *filename);
+int  is_backward_jump(const char *mnemonic);
+int  safe_strcpy(char *dest, const char *src, size_t dest_size);
 
 //=========================== 全局变量 ===========================
 
@@ -379,7 +380,7 @@ int main (int argc, char *argv[])
 // 预处理器
 int preprocess(FILE *in, FILE *out, const char *filename)
 {
-    char line[MAX_LINE_LENGTH];
+    char line[MAX_LINE];  // 统一为 1024
     int line_num = 0;
 
     fprintf(out, ".file \"%s\"\n", filename);
@@ -387,8 +388,18 @@ int preprocess(FILE *in, FILE *out, const char *filename)
     while (fgets(line, sizeof(line), in))
     {
         line_num++;
+        
+        // 检查是否被截断
+        size_t len = strlen(line);
+        if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
+            error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                      "Line too long (max %d bytes).", MAX_LINE - 1);
+            int c;
+            while ((c = fgetc(in)) != '\n' && c != EOF);
+            return 0;  // 直接失败
+        }
+        
         fprintf(out, ".line %d\n", line_num);
-
         line[strcspn(line, "\r\n")] = '\0'; 
         
         char *comment = strchr(line, '#');
@@ -404,7 +415,7 @@ int preprocess(FILE *in, FILE *out, const char *filename)
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
                 if (!handle_include(trimmed, out, 0, filename)) {
-                    return 0; // 失败
+                    return 0;
                 }
                 continue;
             }
@@ -422,26 +433,43 @@ int preprocess(FILE *in, FILE *out, const char *filename)
 // 处理宏定义
 void handle_define(const char *line, const char *current_file, int current_line_num)
 {
-    const char *p = line + 7;  // 跳过 ".define"
+    if (macro_count >= MAX_MACROS) {
+        error_msg(current_file, current_line_num, line, 0, strlen(line), LEVEL_ERROR,
+                  "Too many macros (max %d).", MAX_MACROS);
+        return;
+    }
+
+    const char *p = line + 7;
     while (*p == ' ' || *p == '\t') p++;
     
     char name[MAX_NAME];
     int i = 0;
-    while (*p && *p != '(' && *p != ' ' && *p != '\t' && i < MAX_NAME-1) {
+    while (*p && *p != '(' && *p != ' ' && *p != '\t' && i < MAX_NAME - 1) {
         name[i++] = *p++;
     }
     name[i] = '\0';
     
+    if (name[0] == '\0') {
+        error_msg(current_file, current_line_num, line, 0, strlen(line), LEVEL_ERROR,
+                  "Macro name is empty.");
+        return;
+    }
+    
     Macro *m = &macros[macro_count];
-    strcpy(m->name, name);
+    safe_strcpy(m->name, name, MAX_NAME);
     m->param_count = 0;
     
     if (*p == '(') {
         p++;
         while (*p && *p != ')') {
+            if (m->param_count >= MAX_PARAMS) {
+                error_msg(current_file, current_line_num, line, 0, strlen(line), LEVEL_ERROR,
+                          "Too many macro parameters (max %d).", MAX_PARAMS);
+                return;
+            }
             while (*p == ' ' || *p == '\t') p++;
             int j = 0;
-            while (*p && *p != ',' && *p != ')' && *p != ' ') {
+            while (*p && *p != ',' && *p != ')' && *p != ' ' && j < MAX_NAME - 1) {
                 m->params[m->param_count][j++] = *p++;
             }
             m->params[m->param_count][j] = '\0';
@@ -453,9 +481,14 @@ void handle_define(const char *line, const char *current_file, int current_line_
     }
     
     while (*p == ' ' || *p == '\t') p++;
-    strcpy(m->value, p);
     
-    strcpy(m->source_file, current_file);
+    if (safe_strcpy(m->value, p, MAX_VALUE) != 0) {
+        error_msg(current_file, current_line_num, line, 0, strlen(line), LEVEL_ERROR,
+                  "Macro value too long (max %d).", MAX_VALUE);
+        return;
+    }
+    
+    safe_strcpy(m->source_file, current_file, sizeof(m->source_file));
     m->source_line = current_line_num;
     
     macro_count++;
@@ -486,7 +519,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
         error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Too many includes");
         return 0;
     }
-    strcpy(included_files[include_count], filename);
+    safe_strcpy(included_files[include_count], filename, 256);
     include_count++;
     
     FILE *inc = fopen(filename, "r");
@@ -502,15 +535,19 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
     int line_num = 0;
     while (fgets(buf, sizeof(buf), inc)) {
         line_num++;
-        fprintf(out, ".line %d\n", line_num);
-
+        
         size_t len = strlen(buf);
-        if (len == sizeof(buf) - 1 && buf[len-1] != '\n') {
-            error_msg(filename, line_num, buf, 0, strlen(buf), LEVEL_ERROR, "Line too long");
+        if (len == sizeof(buf) - 1 && buf[len - 1] != '\n' && !feof(inc)) {
+            error_msg(filename, line_num, buf, 0, strlen(buf), LEVEL_ERROR,
+                      "Line too long (max %d bytes).", MAX_LINE - 1);
             int c;
             while ((c = fgetc(inc)) != '\n' && c != EOF);
-            continue;
+            fclose(inc);
+            include_count--;
+            return 0;
         }
+        
+        fprintf(out, ".line %d\n", line_num);
         buf[strcspn(buf, "\r\n")] = '\0';
         
         char *comment = strchr(buf, '#');
@@ -525,7 +562,10 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
                 if (!handle_include(trimmed, out, depth + 1, filename)) {
-                    // 嵌套 include 失败，继续向上传递
+                    // 嵌套失败，直接返回
+                    fclose(inc);
+                    include_count--;
+                    return 0;
                 }
                 continue;
             }
@@ -667,21 +707,17 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
         if (*p == ',') p++;
     }
     
-    // 【新增】检查宏调用参数个数是否匹配
+    // 检查参数个数是否匹配
     if (arg_count != m->param_count) {
-        // 由于这是在预处理阶段，我们还没有记录当前行属于哪个文件，
-        // 但错误是在当前文本行产生的，直接借用预处理阶段的上下文报错即可
-        fprintf(stderr, "Line %d :\n", line_num);
-        fprintf(stderr, "\t%s\n", line);
-        fprintf(stderr, RED"Error:"RESET" Macro '%s' expects %d arguments, but got %d.\n", 
-                m->name, m->param_count, arg_count);
-        // 为了格式统一，我们调用 error_msg，但由于不清楚前导缩进，只能粗略对齐
-        // 更好的做法是把上下文传进来，或者干脆直接打印报错然后退出。
-        exit(1);
+        error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                  "Macro '%s' expects %d arguments, but got %d.", 
+                  m->name, m->param_count, arg_count);
+        return 0;
     }
     
     char value_copy[MAX_VALUE];
-    strcpy(value_copy, m->value);
+    strncpy(value_copy, m->value, MAX_VALUE - 1);
+    value_copy[MAX_VALUE - 1] = '\0';
     
     int written = 0;
     char *segment = strtok(value_copy, ";");
@@ -689,7 +725,8 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
         char *trimmed_seg = trim(segment);
         if (trimmed_seg[0] != '\0') {
             char expanded[MAX_VALUE];
-            strcpy(expanded, trimmed_seg);
+            strncpy(expanded, trimmed_seg, MAX_VALUE - 1);
+            expanded[MAX_VALUE - 1] = '\0';
             
             for (int k = 0; k < m->param_count && k < arg_count; k++) {
                 replace_word(expanded, m->params[k], args[k]);
@@ -755,14 +792,6 @@ int replace_all_macros(char *line)
     return changed;
 }
 
-// 添加标签
-void add_label(const char *name, int addr)
-{
-    strcpy(labels[label_count].name, name);
-    labels[label_count].addr = addr;
-    label_count++;
-}
-
 // 查找标签地址
 int find_label(const char *name)
 {
@@ -781,6 +810,13 @@ int pass1(FILE *in)
     char line[MAX_LINE];
     
     while (fgets(line, sizeof(line), in)) {
+        size_t len = strlen(line);
+        if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
+            error_msg(current_filename, current_line, line, 0, strlen(line), LEVEL_ERROR,
+                      "Line too long (max %d bytes).", MAX_LINE - 1);
+            return -1;
+        }
+        
         line[strcspn(line, "\r\n")] = '\0';
         
         char *comment = strchr(line, '#');
@@ -1219,17 +1255,26 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
     return code;
 }
 
+// 第二遍扫描：生成机器码
 int pass2(FILE *in, FILE *out, const char *filename)
 {
     int addr = 0;
     char line[MAX_LINE];
     int tmp_line = 0; 
     
-    strcpy(current_filename, filename);
+    safe_strcpy(current_filename, filename, sizeof(current_filename));
     current_line = 0;
 
     while (fgets(line, sizeof(line), in)) {
         tmp_line++;
+        
+        size_t len = strlen(line);
+        if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
+            error_msg(current_filename, current_line, line, 0, strlen(line), LEVEL_ERROR,
+                      "Line too long (max %d bytes).", MAX_LINE - 1);
+            return -1;
+        }
+
         line[strcspn(line, "\r\n")] = '\0';
         char *trimmed = trim(line);
 
@@ -1246,10 +1291,10 @@ int pass2(FILE *in, FILE *out, const char *filename)
         }
 
         char source_code[MAX_LINE];
-        strcpy(source_code, line); 
+        safe_strcpy(source_code, line, MAX_LINE);
         
         char parse_line[MAX_LINE];
-        strcpy(parse_line, line);
+        safe_strcpy(parse_line, line, MAX_LINE);
         char *comment = strchr(parse_line, '#');
         if (comment) *comment = '\0';
         
@@ -1318,4 +1363,28 @@ void cleanup_tmp(void) {
     if (tmp_filename[0] != '\0') {
         remove(tmp_filename);
     }
+}
+
+// 安全字符串拷贝，返回 0 表示截断
+int safe_strcpy(char *dest, const char *src, size_t dest_size) {
+    if (dest_size == 0) return -1;
+    size_t i = 0;
+    while (i < dest_size - 1 && src[i] != '\0') {
+        dest[i] = src[i];
+        i++;
+    }
+    dest[i] = '\0';
+    return (src[i] != '\0') ? -1 : 0;  // 返回 -1 表示被截断
+}
+// 添加标签
+void add_label(const char *name, int addr)
+{
+    if (label_count >= MAX_LABELS) {
+        error_msg(current_filename, current_line, name, 0, strlen(name), LEVEL_ERROR,
+                  "Too many labels (max %d).", MAX_LABELS);
+        return;
+    }
+    safe_strcpy(labels[label_count].name, name, MAX_NAME);
+    labels[label_count].addr = addr;
+    label_count++;
 }
