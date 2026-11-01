@@ -125,8 +125,9 @@ char  *trim(char *s);
 void  handle_define(const char *line, const char *current_file, int current_line_num);
 Macro *find_macro(const char *name);
 int   replace_word(char *result, size_t cap, const char *word, const char *replacement);
-int   expand_line(const char *line, FILE *out, int line_num);
-int   expand_param_macro(const char *line, Macro *m, FILE *out, int line_num);
+int   expand_line(const char *line, FILE *out, const char *filename, int line_num);
+int expand_param_macro(const char *line, Macro *m, FILE *out,
+                       const char *filename, int line_num);
 int   replace_all_macros(char *line, size_t cap, int *truncated);
 int   add_label(const char *name, int addr);
 int   find_label(const char *name);
@@ -160,9 +161,10 @@ int  normalize_path(const char *in, char *out, size_t out_size);
 int  get_directory(const char *file_path, char *dir, size_t dir_size);
 int resolve_include_path(const char *base_dir, const char *include_name,
                          char *out_path, size_t out_size);
-
 int  preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir);
-int  handle_include(const char *line, FILE *out, int depth, const char *caller_file, const char *base_dir);
+int handle_include(const char *line, FILE *out, int depth,
+                   const char *caller_file, int caller_line,
+                   const char *base_dir);
 static int  ensure_word_capacity(int addr);
 static int  record_word(int addr, uint16_t code);
 static void free_words(void);
@@ -504,14 +506,16 @@ int preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir)
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
-                if (!handle_include(trimmed, out, 0, filename, base_dir)) {
+                // 传实际行号
+                if (!handle_include(trimmed, out, 0, filename, line_num, base_dir)) {
                     return 0;
                 }
                 continue;
             }
         }
 
-        int r = expand_line(trimmed, out, line_num);
+        // 传实际文件名 + 行号
+        int r = expand_line(trimmed, out, filename, line_num);
         if (r == -1) {
             fputs(trimmed, out);
             fputc('\n', out);
@@ -585,61 +589,68 @@ void handle_define(const char *line, const char *current_file, int current_line_
     macro_count++;
 }
 
-// caller_file 是包含此文件的上一级文件（例如 test.asm）
-int handle_include(const char *line, FILE *out, int depth, const char *caller_file, const char *base_dir)
+// caller_file / caller_line 是包含此文件的上一级文件及行号
+int handle_include(const char *line, FILE *out, int depth,
+                   const char *caller_file, int caller_line,
+                   const char *base_dir)
 {
     if (depth > 16) {
-        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Include depth exceeded");
+        error_msg(caller_file, caller_line, line, 0, strlen(line), LEVEL_ERROR,
+                  "Include depth exceeded");
         return 0;
     }
-    
+
     char include_name[256] = "";
     if (sscanf(line, ".include \"%[^\"]\"", include_name) != 1) {
-        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Invalid include syntax");
+        error_msg(caller_file, caller_line, line, 0, strlen(line), LEVEL_ERROR,
+                  "Invalid include syntax");
         return 0;
     }
-    
+
     // 解析包含文件的完整路径（以调用者所在目录为基准）
     char resolved_path[1024];
     if (resolve_include_path(base_dir, include_name,
                              resolved_path, sizeof(resolved_path)) != 0) {
-        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR,
+        error_msg(caller_file, caller_line, line, 0, strlen(line), LEVEL_ERROR,
                   "Include path too long or invalid: %s", include_name);
         return 0;
     }
-    
+
     // 循环包含检测（用完整路径比较，彻底解决 ./a.asm 和 a.asm 冲突）
     for (int i = 0; i < include_count; i++) {
         if (strcmp(included_files[i], resolved_path) == 0) {
-            error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Circular include: %s", resolved_path);
+            error_msg(caller_file, caller_line, line, 0, strlen(line), LEVEL_ERROR,
+                      "Circular include: %s", resolved_path);
             return 0;
         }
     }
-    
+
     if (include_count >= MAX_INCLUDES) {
-        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Too many includes");
+        error_msg(caller_file, caller_line, line, 0, strlen(line), LEVEL_ERROR,
+                  "Too many includes");
         return 0;
     }
     safe_strcpy(included_files[include_count], resolved_path, 256);
     include_count++;
-    
+
     FILE *inc = fopen(resolved_path, "r");
     if (!inc) {
-        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Cannot open include: %s", resolved_path);
+        error_msg(caller_file, caller_line, line, 0, strlen(line), LEVEL_ERROR,
+                  "Cannot open include: %s", resolved_path);
         include_count--;
         return 0;
     }
-    
+
     // 提取被包含文件所在的目录，供嵌套包含使用
     char new_base_dir[1024];
     if (get_directory(resolved_path, new_base_dir, sizeof(new_base_dir)) != 0) {
-        error_msg(resolved_path, 0, line, 0, strlen(line), LEVEL_ERROR,
+        error_msg(caller_file, caller_line, line, 0, strlen(line), LEVEL_ERROR,
                   "Included file directory path too long.");
         fclose(inc);
         include_count--;
         return 0;
     }
-    
+
     // 记录被包含文件的绝对（或规范）路径
     fprintf(out, ".file \"%s\"\n", resolved_path);
 
@@ -647,7 +658,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
     int line_num = 0;
     while (fgets(buf, sizeof(buf), inc)) {
         line_num++;
-        
+
         size_t len = strlen(buf);
         if (len == sizeof(buf) - 1 && buf[len - 1] != '\n' && !feof(inc)) {
             error_msg(resolved_path, line_num, buf, 0, strlen(buf), LEVEL_ERROR,
@@ -658,22 +669,24 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
             include_count--;
             return 0;
         }
-        
+
         fprintf(out, ".line %d\n", line_num);
         buf[strcspn(buf, "\r\n")] = '\0';
-        
+
         char *comment = strchr(buf, '#');
         if (comment) *comment = '\0';
         char *trimmed = trim(buf);
         if (trimmed[0] == '\0') continue;
-        
+
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
                 handle_define(trimmed, resolved_path, line_num);
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
-                if (!handle_include(trimmed, out, depth + 1, resolved_path, new_base_dir)) {
+                // 递归传 resolved_path + 当前行号
+                if (!handle_include(trimmed, out, depth + 1,
+                                    resolved_path, line_num, new_base_dir)) {
                     fclose(inc);
                     include_count--;
                     return 0;
@@ -681,15 +694,16 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
                 continue;
             }
         }
-        
-        int r = expand_line(trimmed, out, line_num);
+
+        // 传 resolved_path + 当前行号
+        int r = expand_line(trimmed, out, resolved_path, line_num);
         if (r == -1) {
             fputs(trimmed, out);
             fputc('\n', out);
         }
         // r == -2：expand_line 已写截断结果，不再重复
     }
-    
+
     fclose(inc);
     fprintf(out, ".file \"%s\"\n", caller_file);
 
@@ -702,7 +716,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
 //   >0 ：是宏，返回写入的行数
 //   -1 ：不是宏，未写入
 //   -2 ：展开截断，已写出截断结果（调用方不要再写原行）
-int expand_line(const char *line, FILE *out, int line_num)
+int expand_line(const char *line, FILE *out, const char *filename, int line_num)
 {
     char first[MAX_NAME];
     int i = 0;
@@ -715,13 +729,14 @@ int expand_line(const char *line, FILE *out, int line_num)
     Macro *m = find_macro(first);
 
     if (m && m->param_count > 0) {
-        return expand_param_macro(line, m, out, line_num);
+        // 透传 filename + line_num
+        return expand_param_macro(line, m, out, filename, line_num);
     }
 
     // 用 MAX_LINE 而不是 MAX_VALUE：源行本身可能接近 MAX_LINE
     char result[MAX_LINE];
     if (safe_strcpy(result, line, sizeof(result)) != 0) {
-        error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+        error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
                   "Line too long to expand (max %d bytes).", MAX_LINE - 1);
         return -1;
     }
@@ -736,7 +751,7 @@ int expand_line(const char *line, FILE *out, int line_num)
     }
 
     if (truncated) {
-        error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+        error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
                   "Macro expansion exceeds %d bytes (truncated).", MAX_LINE - 1);
         fprintf(out, ".line %d\n", line_num);
         fputs(result, out);
@@ -823,9 +838,10 @@ char *trim(char *s) {
 // line: "LEF R0"
 // m: 宏定义
 // out: 输出文件
-// line_num: 当前行号
+// filename / line_num: 宏调用所在文件与行号（用于报错）
 // 返回：写入的行数
-int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
+int expand_param_macro(const char *line, Macro *m, FILE *out,
+                       const char *filename, int line_num)
 {
     const char *p = line;
     while (*p && *p != ' ' && *p != '\t') p++;
@@ -846,9 +862,9 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
         if (*p == ',') p++;
     }
 
-    // 检查参数个数是否匹配
+    // 参数个数错误：用调用方传进来的 filename / line_num
     if (arg_count != m->param_count) {
-        error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+        error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
                   "Macro '%s' expects %d arguments, but got %d.",
                   m->name, m->param_count, arg_count);
         return 0;
@@ -856,7 +872,7 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
 
     char value_copy[MAX_VALUE];
     if (safe_strcpy(value_copy, m->value, sizeof(value_copy)) != 0) {
-        error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+        error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
                   "Macro value too long (max %d).", MAX_VALUE - 1);
         return 0;
     }
@@ -868,7 +884,7 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
         if (trimmed_seg[0] != '\0') {
             char expanded[MAX_LINE];   // 与源行同尺寸，容纳替换后增长
             if (safe_strcpy(expanded, trimmed_seg, sizeof(expanded)) != 0) {
-                error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
                           "Macro body segment too long (max %d bytes).", MAX_LINE - 1);
                 return written;
             }
@@ -876,7 +892,7 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
             for (int k = 0; k < m->param_count && k < arg_count; k++) {
                 if (replace_word(expanded, sizeof(expanded),
                                  m->params[k], args[k]) < 0) {
-                    error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                    error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
                               "Macro '%s' expansion truncated (max %d bytes).",
                               m->name, MAX_LINE - 1);
                     // 继续写出截断结果，让 pass 报更多错
@@ -890,7 +906,7 @@ int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
                 if (changed == 0) break;
             }
             if (trunc) {
-                error_msg(current_filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
+                error_msg(filename, line_num, line, 0, strlen(line), LEVEL_ERROR,
                           "Macro '%s' expansion truncated (max %d bytes).",
                           m->name, MAX_LINE - 1);
             }
