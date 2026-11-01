@@ -116,7 +116,7 @@ char  *trim(char *s);
 void  handle_define(const char *line, const char *current_file, int current_line_num);
 Macro *find_macro(const char *name);
 void  replace_word(char *result, const char *word, const char *replacement);
-void  preprocess(FILE *in, FILE *out, const char *filename);
+int   preprocess(FILE *in, FILE *out, const char *filename);
 int   expand_line(const char *line, FILE *out, int line_num);
 int   handle_include(const char *line, FILE *out, int depth, const char *current_filename);
 int   expand_param_macro(const char *line, Macro *m, FILE *out, int line_num);
@@ -164,6 +164,9 @@ int current_line = 0;
 
 // 临时文件名
 char tmp_filename[256] = "";
+
+// 错误标志
+int has_error = 0;
 
 //=========================== 日志级别 ===========================
 const char *level_names[] = {"Error", "Warning", "Notice"};
@@ -308,8 +311,7 @@ int main (int argc, char *argv[])
 
     // 打开输入文件
     FILE *input_file = fopen(input, "r");
-    if (!input_file)
-    {
+    if (!input_file) {
         fprintf(stderr, RED"Error:"RESET" Could not open input file: %s\n", input);
         return 1;
     }
@@ -322,16 +324,25 @@ int main (int argc, char *argv[])
         return 1;
     }
 
-    // 运行预处理器
-    preprocess(input_file, tmp, input);
+    // 1. 预处理器
+    if (!preprocess(input_file, tmp, input) || has_error) {
+        fprintf(stderr, RED"Error:"RESET" Preprocessing failed.\n");
+        fclose(input_file);
+        fclose(tmp);
+        return 1;
+    }
 
-    // 运行第一遍扫描
+    // 2. 第一遍扫描
     rewind(tmp);
-    pass1(tmp);
+    if (pass1(tmp) < 0 || has_error) {
+        fprintf(stderr, RED"Error:"RESET" First pass failed.\n");
+        fclose(input_file);
+        fclose(tmp);
+        return 1;
+    }
 
-    // 运行第二遍扫描
+    // 3. 第二遍扫描
     rewind(tmp);
-    // 【修改】使用 "wb" 二进制模式打开，防止 Windows 破坏字节
     FILE *out = fopen(output, "wb");
     if (!out) {
         fprintf(stderr, RED"Error:"RESET" Cannot create %s\n", output);
@@ -339,31 +350,36 @@ int main (int argc, char *argv[])
         fclose(input_file);
         return 1;
     }
-    pass2(tmp, out, input);
+
+    int result = pass2(tmp, out, input);
     
-    // 【新增】检查关闭前是否有写入错误（如磁盘满）
-    if (ferror(out)) {
-        fprintf(stderr, RED"Error:"RESET" Failed to write to %s\n", output);
+    // 4. 检查并清理半成品文件
+    if (result < 0 || has_error || ferror(out)) {
+        fprintf(stderr, RED"Error:"RESET" Assembly failed. Removing incomplete output file.\n");
         fclose(out);
         fclose(tmp);
         fclose(input_file);
+        remove(output); // 关键：删除坏文件
         return 1;
     }
 
     fclose(out);
-    
     fclose(input_file);
     fclose(tmp);
+
+    if (!quiet) {
+        printf(GREEN"Success:"RESET" Output written to %s\n", output);
+    }
 
     return 0;
 }
 
-void preprocess(FILE *in, FILE *out, const char *filename)
+// 预处理器
+int preprocess(FILE *in, FILE *out, const char *filename)
 {
     char line[MAX_LINE_LENGTH];
     int line_num = 0;
 
-    // 写入初始文件标记（原样输出）
     fprintf(out, ".file \"%s\"\n", filename);
 
     while (fgets(line, sizeof(line), in))
@@ -385,7 +401,9 @@ void preprocess(FILE *in, FILE *out, const char *filename)
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
-                handle_include(trimmed, out, 0, filename);
+                if (!handle_include(trimmed, out, 0, filename)) {
+                    return 0; // 失败
+                }
                 continue;
             }
         }
@@ -396,6 +414,7 @@ void preprocess(FILE *in, FILE *out, const char *filename)
             fputc('\n', out);
         }
     }
+    return (has_error ? 0 : 1);
 }
 
 // 处理宏定义
@@ -444,41 +463,37 @@ void handle_define(const char *line, const char *current_file, int current_line_
 int handle_include(const char *line, FILE *out, int depth, const char *caller_file)
 {
     if (depth > 16) {
-        fprintf(stderr, RED"Error:"RESET" Include depth exceeded\n");
+        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Include depth exceeded");
         return 0;
     }
     
-    // 原样解析出的文件名
     char filename[256] = "";
     if (sscanf(line, ".include \"%[^\"]\"", filename) != 1) {
-        fprintf(stderr, RED"Error:"RESET" Invalid include syntax: %s\n", line);
+        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Invalid include syntax");
         return 0;
     }
     
-    // 循环包含检查（原样比较）
     for (int i = 0; i < include_count; i++) {
         if (strcmp(included_files[i], filename) == 0) {
-            fprintf(stderr, RED"Error:"RESET" Circular include: %s\n", filename);
+            error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Circular include: %s", filename);
             return 0;
         }
     }
     
     if (include_count >= MAX_INCLUDES) {
-        fprintf(stderr, RED"Error:"RESET" Too many includes\n");
+        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Too many includes");
         return 0;
     }
     strcpy(included_files[include_count], filename);
     include_count++;
     
-    // 打开文件
     FILE *inc = fopen(filename, "r");
     if (!inc) {
-        fprintf(stderr, RED"Error:"RESET" Cannot open include: %s\n", filename);
+        error_msg(caller_file, 0, line, 0, strlen(line), LEVEL_ERROR, "Cannot open include: %s", filename);
         include_count--;
         return 0;
     }
     
-    // 切换文件标记（原样输出包含名）
     fprintf(out, ".file \"%s\"\n", filename);
 
     char buf[MAX_LINE];
@@ -489,7 +504,7 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
 
         size_t len = strlen(buf);
         if (len == sizeof(buf) - 1 && buf[len-1] != '\n') {
-            fprintf(stderr, RED"Error:"RESET" Line too long in %s\n", filename);
+            error_msg(filename, line_num, buf, 0, strlen(buf), LEVEL_ERROR, "Line too long");
             int c;
             while ((c = fgetc(inc)) != '\n' && c != EOF);
             continue;
@@ -503,13 +518,13 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
         
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
-                // 记录宏定义时，原样传入包含文件名
                 handle_define(trimmed, filename, line_num);
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
-                // 递归包含时，原样传入当前包含名
-                handle_include(trimmed, out, depth + 1, filename);
+                if (!handle_include(trimmed, out, depth + 1, filename)) {
+                    // 嵌套 include 失败，继续向上传递
+                }
                 continue;
             }
         }
@@ -522,12 +537,10 @@ int handle_include(const char *line, FILE *out, int depth, const char *caller_fi
     }
     
     fclose(inc);
-    
-    // 恢复之前的文件标记（原样恢复 caller_file）
     fprintf(out, ".file \"%s\"\n", caller_file);
 
     include_count--;
-    return 1;
+    return (has_error ? 0 : 1);
 }
 
 // 增加 line_num 参数
@@ -766,18 +779,14 @@ int pass1(FILE *in)
     char line[MAX_LINE];
     
     while (fgets(line, sizeof(line), in)) {
-        // 去掉行尾换行
         line[strcspn(line, "\r\n")] = '\0';
         
-        // 去掉注释
         char *comment = strchr(line, '#');
         if (comment) *comment = '\0';
         
-        // 去掉首尾空格
         char *trimmed = trim(line);
         if (trimmed[0] == '\0') continue;
         
-        // 【新增】跳过 .file 和 .line 标记
         if (strncmp(trimmed, ".file ", 6) == 0 || strncmp(trimmed, ".line ", 6) == 0) {
             continue;
         }
@@ -786,7 +795,6 @@ int pass1(FILE *in)
             char *label = extract_label(trimmed);
             add_label(label, addr);
             
-            // 检查标签后是否还有指令
             char *rest = strchr(trimmed, ':') + 1;
             rest = trim(rest);
             if (rest[0] != '\0') {
@@ -795,11 +803,10 @@ int pass1(FILE *in)
             continue;
         }
         
-        // 普通指令，地址递增
         addr += instruction_size(trimmed);
     }
     
-    return addr;
+    return (has_error ? -1 : addr);
 }
 
 // 检查是否是标签行
@@ -881,7 +888,7 @@ void error_msg(const char *filename, int line_num, const char *source,
     fprintf(stderr, "\n");
     
     if (level == LEVEL_ERROR) {
-        exit(1);
+        has_error = 1;
     }
 }
 
@@ -1181,7 +1188,6 @@ int pass2(FILE *in, FILE *out, const char *filename)
     char line[MAX_LINE];
     int tmp_line = 0; 
     
-    // 初始化上下文
     strcpy(current_filename, filename);
     current_line = 0;
 
@@ -1192,23 +1198,19 @@ int pass2(FILE *in, FILE *out, const char *filename)
 
         if (trimmed[0] == '\0') continue;
 
-        // 遇到 .file 切换文件名
         if (strncmp(trimmed, ".file \"", 7) == 0) {
             sscanf(trimmed, ".file \"%[^\"]\"", current_filename);
             continue;
         }
 
-        // 遇到 .line 更新行号
         if (strncmp(trimmed, ".line ", 6) == 0) {
             sscanf(trimmed, ".line %d", &current_line);
             continue;
         }
 
-        // 这是真实的代码行。为了报错时列号对齐，保留带有缩进的原始字符串
         char source_code[MAX_LINE];
         strcpy(source_code, line); 
         
-        // 备份并去掉注释，得到用于解析的字符串
         char parse_line[MAX_LINE];
         strcpy(parse_line, line);
         char *comment = strchr(parse_line, '#');
@@ -1217,7 +1219,6 @@ int pass2(FILE *in, FILE *out, const char *filename)
         char *code = trim(parse_line);
         if (code[0] == '\0') continue;
 
-        // 如果带标签，剥离标签
         if (is_label(code)) {
             char *rest = strchr(code, ':') + 1;
             rest = trim(rest);
@@ -1225,7 +1226,6 @@ int pass2(FILE *in, FILE *out, const char *filename)
             code = rest;
         }
 
-        // 提取助记符
         char mnemonic[MAX_NAME];
         int i = 0;
         while (code[i] && code[i] != ' ' && code[i] != '\t' && i < MAX_NAME-1) {
@@ -1234,45 +1234,38 @@ int pass2(FILE *in, FILE *out, const char *filename)
         }
         mnemonic[i] = '\0';
 
-        // 提取操作数
         const char *operands = code + i;
         while (*operands == ' ' || *operands == '\t') operands++;
 
-        // 检查 loop 形式
         const char *resolved = resolve_loop_jump(mnemonic, operands, addr);
         if (resolved == NULL) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
-                      LEVEL_ERROR, "Undefined label: %s", operands);
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR, "Undefined label: %s", operands);
+            return -1;
         }
 
-        // 查找指令
         Instruction *inst = find_instruction(resolved);
         if (!inst) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
-                      LEVEL_ERROR, "Unknown instruction: %s", mnemonic);
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR, "Unknown instruction: %s", mnemonic);
+            return -1;
         }
 
-        // 计算 base（操作数在源代码中的相对偏移）
-        // 由于 operands 指向 parse_line 里的位置，我们需要它在 source_code 里的位置
         int base = operands - parse_line;
 
-        // 编码，报错时传入 source_code 以保留原样缩进
         uint16_t code_val = encode(inst, operands, addr, base, current_filename, current_line, source_code);
+        if (has_error) return -1; // 编码失败
 
-        // 写入输出
         uint8_t hi = (code_val >> 8) & 0xFF;
         uint8_t lo = code_val & 0xFF;
 
-        // 检查写入结果
         if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
-                      LEVEL_ERROR, "Failed to write machine code to output file.");
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic), LEVEL_ERROR, "Failed to write machine code to output file.");
+            return -1;
         }
 
         addr++;
     }
 
-    return addr;
+    return (has_error ? -1 : addr);
 }
 
 // 判断是否是向后跳转指令
