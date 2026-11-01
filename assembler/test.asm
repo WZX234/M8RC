@@ -1,8 +1,4 @@
-.include "test_include.asm"
-loop2:
-CMPI R0, 8
-JE loop1
-INC R0
-JUMP loop2
-loop1:
-STORE R0, R1, 0
+loop:
+ADDI r0, 1, r0
+STORE r0, r1, 0
+JUMP loop
