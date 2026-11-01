@@ -2187,7 +2187,7 @@ static int write_logisim(FILE *out)
     int words_per_line = LOGISIM_WORDS_PER_LINE;
     for (int base = 0; base < total_words; base += words_per_line) {
         // 地址以字节计：word 序号 * 2
-        unsigned int byte_addr = (unsigned int)base * INSTRUCTION_BYTES;
+        unsigned int byte_addr = (unsigned int)base;
         if (fprintf(out, "%04x: ", byte_addr) < 0)
             return -1;
 

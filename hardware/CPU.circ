@@ -89,7 +89,7 @@
     <a name="appearance" val="logisim_evolution"/>
     <a name="circuit" val="main"/>
     <a name="clabelup" val="west"/>
-    <a name="simulationFrequency" val="32.0"/>
+    <a name="simulationFrequency" val="256.0"/>
     <comp lib="0" loc="(1010,1360)" name="Tunnel">
       <a name="facing" val="east"/>
       <a name="label" val="CLK"/>
@@ -124,7 +124,7 @@
       <a name="facing" val="north"/>
       <a name="label" val="RST"/>
     </comp>
-    <comp lib="0" loc="(1210,1210)" name="Tunnel">
+    <comp lib="0" loc="(1220,1210)" name="Tunnel">
       <a name="label" val="CLK"/>
     </comp>
     <comp lib="0" loc="(1220,1590)" name="Constant"/>
@@ -417,25 +417,11 @@
     <comp lib="0" loc="(690,1180)" name="Pin">
       <a name="appearance" val="NewPins"/>
     </comp>
-    <comp lib="0" loc="(690,1320)" name="Pin">
-      <a name="appearance" val="NewPins"/>
-    </comp>
-    <comp lib="0" loc="(700,1360)" name="Clock">
-      <a name="appearance" val="NewPins"/>
-    </comp>
     <comp lib="0" loc="(710,1180)" name="Tunnel">
       <a name="label" val="RST"/>
     </comp>
-    <comp lib="0" loc="(730,1380)" name="Tunnel">
-      <a name="facing" val="north"/>
-      <a name="label" val="RST"/>
-    </comp>
-    <comp lib="0" loc="(820,1360)" name="Clock">
+    <comp lib="0" loc="(890,1200)" name="Pin">
       <a name="appearance" val="NewPins"/>
-    </comp>
-    <comp lib="0" loc="(850,1380)" name="Tunnel">
-      <a name="facing" val="north"/>
-      <a name="label" val="RST"/>
     </comp>
     <comp lib="0" loc="(900,1570)" name="Pin">
       <a name="appearance" val="NewPins"/>
@@ -447,7 +433,7 @@
     <comp lib="1" loc="(1120,1410)" name="AND Gate">
       <a name="size" val="30"/>
     </comp>
-    <comp lib="1" loc="(1190,1210)" name="AND Gate">
+    <comp lib="1" loc="(1210,1210)" name="AND Gate">
       <a name="size" val="30"/>
     </comp>
     <comp lib="1" loc="(1320,1300)" name="AND Gate">
@@ -640,7 +626,13 @@
       <a name="addrWidth" val="16"/>
       <a name="appearance" val="logisim_evolution"/>
       <a name="contents">addr/data: 16 16
-1001 b482 c023 8400 ffff
+1010 1472 8100 144a 8101 1468 8102 1454
+8103 145e 8104 1cc4 7040 7081 b608 c042
+0 c040 0 8200 8101 7041 7082 b608
+c042 0 c040 0 8201 8102 7042 7083
+b608 c042 0 c040 0 8202 8103 7043
+7084 b608 c042 0 c040 0 8203 8104
+2cc1 6c00 c044 0 c281 0 ffff
 </a>
       <a name="dataWidth" val="16"/>
       <a name="label" val="ROM_2"/>
@@ -690,25 +682,19 @@
     <comp lib="5" loc="(3000,1970)" name="Register">
       <a name="appearance" val="logisim_evolution"/>
     </comp>
-    <comp lib="5" loc="(710,1310)" name="D Flip-Flop">
-      <a name="appearance" val="logisim_evolution"/>
-    </comp>
-    <comp lib="5" loc="(830,1310)" name="D Flip-Flop">
-      <a name="appearance" val="logisim_evolution"/>
-    </comp>
     <comp lib="9" loc="(1015,1530)" name="Text">
       <a name="text" val="中断状态"/>
+    </comp>
+    <comp lib="9" loc="(1036,953)" name="Text">
+      <a name="color" val="#ff0021"/>
+      <a name="font" val="圆构黑体 CHS bold 39"/>
+      <a name="text" val="搞SYSCALL！"/>
     </comp>
     <comp lib="9" loc="(1055,1435)" name="Text">
       <a name="text" val="中断状态"/>
     </comp>
     <comp lib="9" loc="(1060,1280)" name="Text">
       <a name="text" val="HLT"/>
-    </comp>
-    <comp lib="9" loc="(1089,1129)" name="Text">
-      <a name="color" val="#ff0021"/>
-      <a name="font" val="圆构黑体 CHS bold 39"/>
-      <a name="text" val="搞SYSCALL！"/>
     </comp>
     <comp lib="9" loc="(1105,1610)" name="Text">
       <a name="text" val="影子PC"/>
@@ -722,21 +708,21 @@
     <comp lib="9" loc="(1295,1605)" name="Text">
       <a name="text" val="PC"/>
     </comp>
-    <comp lib="9" loc="(3053,2152)" name="Text">
+    <comp lib="9" loc="(3050,2150)" name="Text">
       <a name="color" val="#ff002b"/>
       <a name="font" val="圆构黑体 CHS bold 39"/>
       <a name="text" val="加IO！"/>
     </comp>
-    <comp lib="9" loc="(3068,1455)" name="Text">
+    <comp lib="9" loc="(3065,1455)" name="Text">
       <a name="color" val="#ff002c"/>
       <a name="font" val="圆构黑体 CHS bold 39"/>
       <a name="text" val="加更新标志位选择！"/>
     </comp>
-    <comp lib="9" loc="(610,1325)" name="Text">
-      <a name="text" val="中断信号"/>
-    </comp>
     <comp lib="9" loc="(770,1435)" name="Text">
       <a name="text" val="打拍"/>
+    </comp>
+    <comp lib="9" loc="(810,1205)" name="Text">
+      <a name="text" val="中断信号"/>
     </comp>
     <comp lib="9" loc="(830,1540)" name="Text">
       <a name="text" val="中断向量"/>
@@ -768,7 +754,7 @@
     <wire from="(1080,1360)" to="(1080,1400)"/>
     <wire from="(1080,1360)" to="(1160,1360)"/>
     <wire from="(1080,1400)" to="(1090,1400)"/>
-    <wire from="(1090,1200)" to="(1160,1200)"/>
+    <wire from="(1090,1200)" to="(1180,1200)"/>
     <wire from="(1110,1710)" to="(1110,1720)"/>
     <wire from="(1120,1310)" to="(1130,1310)"/>
     <wire from="(1120,1410)" to="(1130,1410)"/>
@@ -776,19 +762,19 @@
     <wire from="(1130,1290)" to="(1290,1290)"/>
     <wire from="(1130,1310)" to="(1160,1310)"/>
     <wire from="(1130,1410)" to="(1130,1540)"/>
-    <wire from="(1140,1220)" to="(1160,1220)"/>
+    <wire from="(1140,1220)" to="(1180,1220)"/>
     <wire from="(1140,1650)" to="(1150,1650)"/>
     <wire from="(1150,1580)" to="(1150,1650)"/>
     <wire from="(1150,1580)" to="(1160,1580)"/>
     <wire from="(1160,1360)" to="(1160,1420)"/>
     <wire from="(1160,1420)" to="(2480,1420)"/>
     <wire from="(1170,1510)" to="(1170,1550)"/>
-    <wire from="(1190,1210)" to="(1210,1210)"/>
     <wire from="(1190,1360)" to="(1190,1370)"/>
     <wire from="(1190,1570)" to="(1220,1570)"/>
     <wire from="(1200,1460)" to="(1200,1890)"/>
     <wire from="(1200,1460)" to="(1230,1460)"/>
     <wire from="(1200,1890)" to="(1390,1890)"/>
+    <wire from="(1210,1210)" to="(1220,1210)"/>
     <wire from="(1220,1350)" to="(1250,1350)"/>
     <wire from="(1230,1050)" to="(1230,1460)"/>
     <wire from="(1230,1050)" to="(1860,1050)"/>
@@ -1160,11 +1146,7 @@
     <wire from="(3280,1730)" to="(3290,1730)"/>
     <wire from="(3290,1730)" to="(3290,1930)"/>
     <wire from="(690,1180)" to="(710,1180)"/>
-    <wire from="(690,1320)" to="(700,1320)"/>
-    <wire from="(730,1370)" to="(730,1380)"/>
-    <wire from="(760,1320)" to="(820,1320)"/>
-    <wire from="(850,1370)" to="(850,1380)"/>
-    <wire from="(880,1320)" to="(950,1320)"/>
+    <wire from="(890,1200)" to="(950,1200)"/>
     <wire from="(900,1570)" to="(940,1570)"/>
     <wire from="(920,1500)" to="(1210,1500)"/>
     <wire from="(920,1500)" to="(920,1550)"/>
@@ -2371,8 +2353,8 @@
       <rect fill="none" height="40" stroke="#000000" width="40" x="50" y="50"/>
       <text dominant-baseline="central" font-family="SansSerif" font-size="12" text-anchor="middle" x="68" y="72">AU</text>
       <circ-anchor facing="east" x="50" y="90"/>
-      <circ-port dir="in" pin="280,270" x="50" y="60"/>
-      <circ-port dir="in" pin="280,290" x="50" y="80"/>
+      <circ-port dir="in" pin="280,270" x="50" y="80"/>
+      <circ-port dir="in" pin="280,290" x="50" y="60"/>
       <circ-port dir="in" pin="300,240" x="70" y="50"/>
       <circ-port dir="out" pin="480,280" x="90" y="70"/>
     </appear>
