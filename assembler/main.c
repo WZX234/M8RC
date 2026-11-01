@@ -1,10 +1,12 @@
 #include <time.h>
 #include <stdio.h>
-#include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <limits.h>
 
 // ANSI color codes
 #define RED      "\033[91m"
@@ -303,7 +305,7 @@ int main (int argc, char *argv[])
     if (input == NULL)
     {
         fprintf(stderr, RED"Error:"RESET" No input file specified\n");
-        fprintf(stderr, "  Use "YELLOW"%s --help"RESET" for usage information.\n", argv[0]);
+        fprintf(stderr, "Use "YELLOW"%s --help"RESET" for usage information.\n", argv[0]);
         return 1;
     }
 
@@ -956,17 +958,45 @@ int parse_immediate(const char *s, const char *filename, int line_num,
     char *end;
     long value;
     
+    errno = 0; // 清除 errno
+    
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        if (strlen(s) <= 2) {
+            error_msg(filename, line_num, source, col, strlen(s), LEVEL_ERROR,
+                      "Invalid hexadecimal immediate value: \"%s\".", s);
+            return -1;
+        }
         value = strtol(s, &end, 16);
     } else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) {
+        if (strlen(s) <= 2) {
+            error_msg(filename, line_num, source, col, strlen(s), LEVEL_ERROR,
+                      "Invalid binary immediate value: \"%s\".", s);
+            return -1;
+        }
         value = strtol(s + 2, &end, 2);
     } else {
         value = strtol(s, &end, 10);
     }
     
+    // 检查是否解析到了数字
+    if (end == s || (s[0] == '0' && (s[1] == 'x' || s[1] == 'X') && end == s + 2) ||
+        (s[0] == '0' && (s[1] == 'b' || s[1] == 'B') && end == s + 2)) {
+        error_msg(filename, line_num, source, col, strlen(s), LEVEL_ERROR,
+                  "The name \"%s\" is not a valid immediate value.", s);
+        return -1;
+    }
+    
+    // 检查是否有多余字符
     if (*end != '\0') {
         error_msg(filename, line_num, source, col, strlen(s), LEVEL_ERROR,
                   "The name \"%s\" is not a valid immediate value.", s);
+        return -1;
+    }
+    
+    // 检查溢出
+    if (errno == ERANGE || value > INT_MAX || value < INT_MIN) {
+        error_msg(filename, line_num, source, col, strlen(s), LEVEL_ERROR,
+                  "Immediate value \"%s\" is out of range.", s);
         return -1;
     }
     
@@ -1171,6 +1201,13 @@ uint16_t encode(Instruction *inst, const char *operands, int addr, int base,
         case FMT_SYSCALL:
             {
                 int imm = parse_immediate(args[0], filename, line_num, source, cols[0]);
+                
+                // 范围检查
+                if (imm < 0 || imm > 255) {
+                    error_msg(filename, line_num, source, cols[0], strlen(args[0]),
+                              LEVEL_ERROR, "Immediate value %d out of range (0-255).", imm);
+                }
+                
                 code |= ((imm >> 6) & 0x3) << 10;
                 code |= ((imm >> 4) & 0x3) << 8;
                 code |= ((imm >> 2) & 0x3) << 6;
