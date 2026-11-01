@@ -109,13 +109,13 @@ typedef struct {
 } Label;
 
 char  *trim(char *s);
-void  preprocess(FILE *in, FILE *out);
 void  handle_define(const char *line);
 Macro *find_macro(const char *name);
 void  replace_word(char *result, const char *word, const char *replacement);
-int   expand_line(const char *line, FILE *out);
-int   handle_include(const char *line, FILE *out, int depth);
-int   expand_param_macro(const char *line, Macro *m, FILE *out);
+void  preprocess(FILE *in, FILE *out, const char *filename);
+int   expand_line(const char *line, FILE *out, int line_num);
+int   handle_include(const char *line, FILE *out, int depth, const char *current_filename);
+int   expand_param_macro(const char *line, Macro *m, FILE *out, int line_num);
 int   replace_all_macros(char *line);
 void  add_label(const char *name, int addr);
 int   find_label(const char *name);
@@ -153,6 +153,10 @@ int label_count = 0;
 // 包含文件栈
 char included_files[MAX_INCLUDES][256];
 int include_count = 0;
+
+// 预处理输出和报错追踪上下文
+char current_filename[256] = "";
+int current_line = 0;
 
 //=========================== 日志级别 ===========================
 const char *level_names[] = {"Error", "Warning", "Notice"};
@@ -299,7 +303,7 @@ int main (int argc, char *argv[])
     }
 
     // 运行预处理器
-    preprocess(input_file, tmp);
+    preprocess(input_file, tmp, input);
 
     // 运行第一遍扫描
     rewind(tmp);
@@ -324,34 +328,46 @@ int main (int argc, char *argv[])
     return 0;
 }
 
-void preprocess(FILE *in, FILE *out)
+void preprocess(FILE *in, FILE *out, const char *filename)
 {
-    char line[MAX_LINE_LENGTH]; // 每行的缓冲区
-    int line_num = 0;           // 当前行号
+    char line[MAX_LINE_LENGTH];
+    int line_num = 0;
+
+    // 写入初始文件标记
+    fprintf(out, ".file \"%s\"\n", filename);
 
     while (fgets(line, sizeof(line), in))
     {
         line_num++;
-        // 处理这一行
-        line[strcspn(line, "\r\n")] = '\0'; // 去掉行尾换行
-        char *comment = strchr(line, '#');  // 查找注释的起始位置
-        if (comment) *comment = '\0';       // 截断至注释前
-        char *trimmed = trim(line);         // 去掉行首和行尾的空格
-        if (trimmed[0] == '\0') continue;   // 如果这一行是空的，跳过
+        
+        // 写入当前行号标记
+        fprintf(out, ".line %d\n", line_num);
+
+        // 去换行
+        line[strcspn(line, "\r\n")] = '\0'; 
+        
+        // 去注释
+        char *comment = strchr(line, '#');
+        if (comment) *comment = '\0'; 
+
+        // 去首尾空格
+        char *trimmed = trim(line);
+        if (trimmed[0] == '\0') continue;
+
         // 处理宏定义和包含文件
         if (trimmed[0] == '.') {
             if (strncmp(trimmed, ".define", 7) == 0) {
                 handle_define(trimmed);
-                continue;  // 不写入输出文件
+                continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
-                handle_include(trimmed, out, 0);
+                handle_include(trimmed, out, 0, filename);
                 continue;
             }
         }
-        // 处理宏展开
+
         // 宏展开
-        int r = expand_line(trimmed, out);
+        int r = expand_line(trimmed, out, line_num);
         if (r < 0) {
             // 不是宏，原样输出
             fputs(trimmed, out);
@@ -404,7 +420,7 @@ void handle_define(const char *line)
     macro_count++;
 }
 
-int handle_include(const char *line, FILE *out, int depth)
+int handle_include(const char *line, FILE *out, int depth, const char *current_filename)
 {
     // 1. 深度检查
     if (depth > 16) {
@@ -443,9 +459,16 @@ int handle_include(const char *line, FILE *out, int depth)
         return 0;
     }
     
-    // 6. 逐行处理
+    // 6. 切换文件标记
+    fprintf(out, ".file \"%s\"\n", filename);
+
+    // 7. 逐行处理
     char buf[MAX_LINE];
+    int line_num = 0;
     while (fgets(buf, sizeof(buf), inc)) {
+        line_num++;
+        fprintf(out, ".line %d\n", line_num);
+
         // 检测截断
         size_t len = strlen(buf);
         if (len == sizeof(buf) - 1 && buf[len-1] != '\n') {
@@ -473,13 +496,13 @@ int handle_include(const char *line, FILE *out, int depth)
                 continue;
             }
             if (strncmp(trimmed, ".include", 8) == 0) {
-                handle_include(trimmed, out, depth + 1);
+                handle_include(trimmed, out, depth + 1, filename);
                 continue;
             }
         }
         
         // 宏展开
-        int r = expand_line(trimmed, out);
+        int r = expand_line(trimmed, out, line_num);
         if (r < 0) {
             fputs(trimmed, out);
             fputc('\n', out);
@@ -488,16 +511,21 @@ int handle_include(const char *line, FILE *out, int depth)
     
     fclose(inc);
     
-    // 7. 弹栈
+    // 8. 恢复之前的文件标记
+    fprintf(out, ".file \"%s\"\n", current_filename);
+
+    // 9. 弹栈
     include_count--;
     
     return 1;
 }
+
+// 增加 line_num 参数
 // 展开一行
 // 返回值：
 //   >= 0：是宏，返回写入的行数
 //   -1：不是宏，未写入
-int expand_line(const char *line, FILE *out)
+int expand_line(const char *line, FILE *out, int line_num)
 {
     // 提取第一个词
     char first[MAX_NAME];
@@ -511,29 +539,12 @@ int expand_line(const char *line, FILE *out)
     // 查找宏
     Macro *m = find_macro(first);
     
-    // 第一步：行首是带参宏？
+    // 第一步：行首是带参宏
     if (m && m->param_count > 0) {
-        return expand_param_macro(line, m, out);
+        return expand_param_macro(line, m, out, line_num);
     }
     
-    // 第二步：行首是无参宏？
-    if (m && m->param_count == 0) {
-        char result[MAX_VALUE];
-        strcpy(result, line);
-        
-        int total = 0;
-        for (int pass = 0; pass < 32; pass++) {
-            int changed = replace_all_macros(result);
-            if (changed == 0) break;
-            total += changed;
-        }
-        
-        fputs(result, out);
-        fputc('\n', out);
-        return 1;
-    }
-
-    // 第三步：行首不是宏，但行内可能有宏
+    // 第二步：行首是无参宏，或普通代码
     char result[MAX_VALUE];
     strcpy(result, line);
 
@@ -544,7 +555,9 @@ int expand_line(const char *line, FILE *out)
         total += changed;
     }
 
-    if (total > 0) {
+    // 如果发生了替换，或者本来就是无参宏
+    if (total > 0 || m) {
+        fprintf(out, ".line %d\n", line_num); // 插入行号标记
         fputs(result, out);
         fputc('\n', out);
         return 1;
@@ -608,8 +621,10 @@ char *trim(char *s) {
 // line: "LEF R0"
 // m: 宏定义
 // out: 输出文件
+// line_num: 当前行号
 // 返回：写入的行数
-int expand_param_macro(const char *line, Macro *m, FILE *out)
+// 展开带参宏
+int expand_param_macro(const char *line, Macro *m, FILE *out, int line_num)
 {
     // 跳过宏名
     const char *p = line;
@@ -655,6 +670,8 @@ int expand_param_macro(const char *line, Macro *m, FILE *out)
                 if (replace_all_macros(expanded) == 0) break;
             }
             
+            // 展开生成的每一条指令，都打上触发宏那一行的行号
+            fprintf(out, ".line %d\n", line_num);
             fputs(expanded, out);
             fputc('\n', out);
             written++;
@@ -1138,96 +1155,95 @@ int pass2(FILE *in, FILE *out, const char *filename)
 {
     int addr = 0;
     char line[MAX_LINE];
-    int line_num = 0;
+    int tmp_line = 0; 
     
+    // 初始化上下文
+    strcpy(current_filename, filename);
+    current_line = 0;
+
     while (fgets(line, sizeof(line), in)) {
-        line_num++;
-        
-        // 保存原始行（用于报错）
-        char original[MAX_LINE];
-        strcpy(original, line);
-        original[strcspn(original, "\r\n")] = '\0';
-        
-        // 去掉行尾换行
+        tmp_line++;
         line[strcspn(line, "\r\n")] = '\0';
+        char *trimmed = trim(line);
+
+        if (trimmed[0] == '\0') continue;
+
+        // 遇到 .file 切换文件名
+        if (strncmp(trimmed, ".file \"", 7) == 0) {
+            sscanf(trimmed, ".file \"%[^\"]\"", current_filename);
+            continue;
+        }
+
+        // 遇到 .line 更新行号
+        if (strncmp(trimmed, ".line ", 6) == 0) {
+            sscanf(trimmed, ".line %d", &current_line);
+            continue;
+        }
+
+        // 这是真实的代码行。为了报错时列号对齐，保留带有缩进的原始字符串
+        char source_code[MAX_LINE];
+        strcpy(source_code, line); 
         
-        // 去掉注释
-        char *comment = strchr(line, '#');
+        // 备份并去掉注释，得到用于解析的字符串
+        char parse_line[MAX_LINE];
+        strcpy(parse_line, line);
+        char *comment = strchr(parse_line, '#');
         if (comment) *comment = '\0';
         
-        // 去掉首尾空格
-        char *trimmed = trim(line);
-        if (trimmed[0] == '\0') continue;
-        
-        // 处理标签
-        if (is_label(trimmed)) {
-            char *rest = strchr(trimmed, ':') + 1;
+        char *code = trim(parse_line);
+        if (code[0] == '\0') continue;
+
+        // 如果带标签，剥离标签
+        if (is_label(code)) {
+            char *rest = strchr(code, ':') + 1;
             rest = trim(rest);
             if (rest[0] == '\0') continue;
-            trimmed = rest;
+            code = rest;
         }
-        
+
         // 提取助记符
         char mnemonic[MAX_NAME];
         int i = 0;
-        while (trimmed[i] && trimmed[i] != ' ' && trimmed[i] != '\t' && i < MAX_NAME-1) {
-            mnemonic[i] = trimmed[i];
+        while (code[i] && code[i] != ' ' && code[i] != '\t' && i < MAX_NAME-1) {
+            mnemonic[i] = code[i];
             i++;
         }
         mnemonic[i] = '\0';
-        
+
         // 提取操作数
-        const char *operands = trimmed + i;
+        const char *operands = code + i;
         while (*operands == ' ' || *operands == '\t') operands++;
-        
-        // 检查是否是宏调用（针对宏展开的代码做特殊处理）
-        Macro *m = find_macro(mnemonic);
-        int base = 0;
-        const char *err_source = original; 
-        int err_col = 0;
-        
-        if (m) {
-            // 如果是宏展开生成的行，直接在原始行找宏名并报错，不再往下解析
-            err_col = 0; // 宏名通常在开头
-            char *macro_pos = strstr(original, mnemonic);
-            if (macro_pos) err_col = macro_pos - original;
-            
-            // 因为宏展开后的代码不在原文件里，找不到错位点，直接报错
-            error_msg(filename, line_num, original, err_col, strlen(mnemonic), LEVEL_ERROR,
-                      "Macro expansion generated invalid instruction/operand.");
-        } else {
-            // 普通指令，计算 base
-            base = operands - original;
-            err_source = original;
-        }
-        
+
         // 检查 loop 形式
         const char *resolved = resolve_loop_jump(mnemonic, operands, addr);
         if (resolved == NULL) {
-            error_msg(filename, line_num, err_source, 0, strlen(mnemonic),
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
                       LEVEL_ERROR, "Undefined label: %s", operands);
         }
-        
+
         // 查找指令
         Instruction *inst = find_instruction(resolved);
         if (!inst) {
-            error_msg(filename, line_num, err_source, 0, strlen(mnemonic),
+            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
                       LEVEL_ERROR, "Unknown instruction: %s", mnemonic);
         }
-        
-        // 编码
-        // 注意：此处 err_source 必须传 original，如果发生了报错，里面的 col 都是基于 original 算的
-        uint16_t code = encode(inst, operands, addr, base, filename, line_num, err_source);
-        
+
+        // 计算 base（操作数在源代码中的相对偏移）
+        // 由于 operands 指向 parse_line 里的位置，我们需要它在 source_code 里的位置
+        int base = operands - parse_line;
+
+        // 编码，报错时传入 source_code 以保留原样缩进
+        uint16_t code_val = encode(inst, operands, addr, base, current_filename, current_line, source_code);
+
         // 写入输出
-        uint8_t hi = (code >> 8) & 0xFF;
-        uint8_t lo = code & 0xFF;
+        uint8_t hi = (code_val >> 8) & 0xFF;
+        uint8_t lo = code_val & 0xFF;
         fwrite(&hi, 1, 1, out);
         fwrite(&lo, 1, 1, out);
-        
+
         addr++;
     }
-    
+
     return addr;
 }
 
