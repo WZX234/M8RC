@@ -1,8 +1,8 @@
-.file "c:\Users\dell\Desktop\M8RC\assembler\test.asm"
+.file "test.asm"
 .line 1
 .file "test_include.asm"
 .line 1
-.file "c:\Users\dell\Desktop\M8RC\assembler\test.asm"
+.file "test.asm"
 .line 2
 loop2:
 .line 3
