@@ -51,6 +51,10 @@
 // 达到此数量后停止继续报错
 #define MAX_ERRORS 100
 
+#define INSTRUCTION_BYTES 2          // 每条指令 2 字节
+#define LOGISIM_WORDS_PER_LINE 16    // 每行 16 个字
+#define LOGISIM_MAX_WORDS 32768      // 64KB / 2 = 32768 个字（logisim 补零到满）
+
 // 指令结构体
 typedef struct {
     const char *mnemonic;  // 指令助记符，如 "ADDI"
@@ -145,7 +149,7 @@ const char *resolve_loop_jump(const char *mnemonic, const char *operand,
 int encode(Instruction *inst, const char *operands, int addr, int base,
            const char *filename, int line_num, const char *source,
            uint16_t *code_out);
-int  pass2(FILE *in, FILE *out, const char *filename);
+int  pass2(FILE *in, const char *filename);
 int  is_backward_jump(const char *mnemonic);
 int  safe_strcpy(char *dest, const char *src, size_t dest_size);
 int  is_valid_identifier(const char *s);
@@ -158,6 +162,14 @@ void resolve_include_path(const char *base_dir, const char *include_name, char *
 
 int  preprocess(FILE *in, FILE *out, const char *filename, const char *base_dir);
 int  handle_include(const char *line, FILE *out, int depth, const char *caller_file, const char *base_dir);
+static int  ensure_word_capacity(int addr);
+static int  record_word(int addr, uint16_t code);
+static void free_words(void);
+static int write_bin(FILE *out);
+static int write_hex(FILE *out);
+static int write_logisim(FILE *out);
+static int write_output(FILE *out, const char *format);
+static int is_valid_format(const char *format);
 
 //=========================== 全局变量 ===========================
 
@@ -206,7 +218,12 @@ char *input = NULL;     // 输入文件名
 char *output = "a.out"; // 输出文件名
 char *format = "bin";   // 输出格式
 char *listing = NULL;   // 汇编列表文件名
-int quiet = 0;          // 安静模式标志
+int  quiet = 0;          // 安静模式标志
+
+// 输出缓冲：pass2 收集，最后按 format 写出
+static uint16_t *g_words = NULL;   // 每条指令的机器码
+static int       g_word_count = 0; // 实际条数
+static int       g_word_cap   = 0; // 容量
 
 int main(int argc, char *argv[])
 {
@@ -319,6 +336,12 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // 检查输出格式
+    if (!is_valid_format(format)) {
+        fprintf(stderr, RED "Error:" RESET " Unknown format '%s' (supported: bin, hex, logisim)\n", format);
+        return 1;
+    }
+
     //=========================================== 文件打开 =========================================
 
     char abs_input_path[1024];
@@ -366,62 +389,73 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // 3. 第二遍扫描（即使 has_error 也继续，尽量收集全部错误）
+    // 3. 第二遍扫描（收集，不直接写文件）
     rewind(tmp);
-    FILE *out = fopen(output, "wb");
-    if (!out) {
-        fprintf(stderr, RED"Error:"RESET" Cannot create %s\n", output);
-        fclose(tmp);
+    int n_words = pass2(tmp, abs_input_path);
+    if (n_words < 0) {
+        fprintf(stderr, RED "Error:" RESET " Assembly failed (pass2 fatal).\n");
+        free_words();
         fclose(input_file);
+        fclose(tmp);
         return 1;
     }
 
-    int result = pass2(tmp, out, abs_input_path);
-
-    if (result < 0 || ferror(out)) {
-        fprintf(stderr, RED"Error:"RESET" Assembly failed (write error). Removing incomplete output file.\n");
-        fclose(out);
-        fclose(tmp);
-        fclose(input_file);
-        remove(output);
-        if (!quiet) {
-            printf("%d error(s), %d warning(s), %d notice(s)\n",
-                   error_count, warning_count, notice_count);
-        }
-        return 1;
-    }
-
-    fclose(out);
     fclose(input_file);
     fclose(tmp);
 
-    //=========================================== 汇总与退出 =========================================
-
-    if (!quiet) {
-        printf("%d error(s), %d warning(s), %d notice(s)\n",
-               error_count, warning_count, notice_count);
+    // 4. 按格式写出
+    FILE *out = NULL;
+    if (strcmp(format, "bin") == 0) {
+        out = fopen(output, "wb");
+    } else {
+        out = fopen(output, "w");   // hex / logisim 是文本
+    }
+    if (!out) {
+        fprintf(stderr, RED "Error:" RESET " Cannot create %s\n", output);
+        free_words();
+        return 1;
     }
 
-    // 判定失败：有错误，或 fatal-warnings 且有警告
-    int failed = (error_count > 0) ||
-                 (fatal_warnings && warning_count > 0);
+    if (write_output(out, format) < 0) {
+        fprintf(stderr, RED "Error:" RESET " Failed to write output file.\n");
+        fclose(out);
+        remove(output);
+        free_words();
+        return 1;
+    }
 
+    if (fclose(out) != 0) {
+        fprintf(stderr, RED "Error:" RESET " Failed to flush output file.\n");
+        remove(output);
+        free_words();
+        return 1;
+    }
+
+    // 5. 汇总
+    if (!quiet) {
+        printf("%d error(s), %d warning(s), %d notice(s)\n",
+            error_count, warning_count, notice_count);
+    }
+
+    int failed = (error_count > 0) || (fatal_warnings && warning_count > 0);
     if (failed) {
         if (error_count > 0) {
-            fprintf(stderr, RED"Error:"RESET" Assembly failed with %d error(s). "
+            fprintf(stderr, RED "Error:" RESET " Assembly failed with %d error(s). "
                     "Output file removed.\n", error_count);
         } else {
-            fprintf(stderr, RED"Error:"RESET" Assembly failed: warnings treated as fatal "
+            fprintf(stderr, RED "Error:" RESET " Assembly failed: warnings treated as fatal "
                     "(%d warning(s)). Output file removed.\n", warning_count);
         }
         remove(output);
+        free_words();
         return 1;
     }
 
     if (!quiet) {
-        printf(GREEN"Success:"RESET" Output written to %s\n", output);
+        printf(GREEN "Success:" RESET " Output written to %s (%s format)\n", output, format);
     }
 
+    free_words();
     return 0;
 }
 
@@ -1412,26 +1446,22 @@ int encode(Instruction *inst, const char *operands, int addr, int base,
     return 0;
 }
 
-// 第二遍扫描：生成机器码
-// 返回处理的总字节数；仅写文件失败等致命情况返回 -1
-int pass2(FILE *in, FILE *out, const char *filename)
+// 第二遍扫描：收集机器码到 g_words
+// 返回处理的指令数；仅致命错误返回 -1
+int pass2(FILE *in, const char *filename)
 {
     int addr = 0;
     char line[MAX_LINE];
-    int tmp_line = 0;
 
     safe_strcpy(current_filename, filename, sizeof(current_filename));
     current_line = 0;
 
     while (fgets(line, sizeof(line), in)) {
-        tmp_line++;
-
         // 长行截断检查
         size_t len = strlen(line);
         if (len == sizeof(line) - 1 && line[len - 1] != '\n' && !feof(in)) {
             error_msg(current_filename, current_line, line, 0, strlen(line), LEVEL_ERROR,
                       "Line too long (max %d bytes).", MAX_LINE - 1);
-            // 吞掉本行剩余部分，继续
             int c;
             while ((c = fgetc(in)) != '\n' && c != EOF);
             continue;
@@ -1439,25 +1469,20 @@ int pass2(FILE *in, FILE *out, const char *filename)
 
         line[strcspn(line, "\r\n")] = '\0';
         char *trimmed = trim(line);
-
         if (trimmed[0] == '\0') continue;
 
-        // 处理 .file 和 .line 标记
         if (strncmp(trimmed, ".file \"", 7) == 0) {
             sscanf(trimmed, ".file \"%[^\"]\"", current_filename);
             continue;
         }
-
         if (strncmp(trimmed, ".line ", 6) == 0) {
             sscanf(trimmed, ".line %d", &current_line);
             continue;
         }
 
-        // 保留原始代码行用于报错对齐
         char source_code[MAX_LINE];
         safe_strcpy(source_code, line, MAX_LINE);
 
-        // 用于解析的备份（去注释）
         char parse_line[MAX_LINE];
         safe_strcpy(parse_line, line, MAX_LINE);
         char *comment = strchr(parse_line, '#');
@@ -1466,7 +1491,6 @@ int pass2(FILE *in, FILE *out, const char *filename)
         char *code = trim(parse_line);
         if (code[0] == '\0') continue;
 
-        // 剥离标签
         if (is_label(code)) {
             char *rest = strchr(code, ':') + 1;
             rest = trim(rest);
@@ -1474,7 +1498,6 @@ int pass2(FILE *in, FILE *out, const char *filename)
             code = rest;
         }
 
-        // 提取助记符
         char mnemonic[MAX_NAME];
         int i = 0;
         while (code[i] && code[i] != ' ' && code[i] != '\t' && i < MAX_NAME - 1) {
@@ -1483,62 +1506,36 @@ int pass2(FILE *in, FILE *out, const char *filename)
         }
         mnemonic[i] = '\0';
 
-        // 提取操作数
         const char *operands = code + i;
         while (*operands == ' ' || *operands == '\t') operands++;
 
-        uint16_t code_val = 0x0000;   // 默认占位 NOP
+        uint16_t code_val = 0x0000;
 
-        // 检查 loop 形式
         const char *resolved = resolve_loop_jump(mnemonic, operands, addr);
         if (resolved == NULL) {
             error_msg(current_filename, current_line, source_code, 0, strlen(operands),
                       LEVEL_ERROR, "Undefined label: \"%s\".", operands);
-            // 写占位并继续
-            uint8_t hi = 0, lo = 0;
-            if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
-                error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
-                          LEVEL_ERROR, "Failed to write machine code to output file.");
-                return -1;
-            }
+            if (record_word(addr, 0x0000) < 0) return -1;
             addr++;
             continue;
         }
 
-        // 查找指令
         Instruction *inst = find_instruction(resolved);
         if (!inst) {
             error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
                       LEVEL_ERROR, "Unknown instruction: \"%s\".", mnemonic);
-            uint8_t hi = 0, lo = 0;
-            if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
-                error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
-                          LEVEL_ERROR, "Failed to write machine code to output file.");
-                return -1;
-            }
+            if (record_word(addr, 0x0000) < 0) return -1;
             addr++;
             continue;
         }
 
-        // 计算操作数在源代码中的偏移
         int base = operands - parse_line;
-
-        // 编码；失败则保留占位 0x0000
         if (encode(inst, operands, addr, base, current_filename, current_line,
                    source_code, &code_val) < 0) {
             code_val = 0x0000;
         }
 
-        // 写入机器码（大端序）
-        uint8_t hi = (code_val >> 8) & 0xFF;
-        uint8_t lo = code_val & 0xFF;
-
-        if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
-            error_msg(current_filename, current_line, source_code, 0, strlen(mnemonic),
-                      LEVEL_ERROR, "Failed to write machine code to output file.");
-            return -1;
-        }
-
+        if (record_word(addr, code_val) < 0) return -1;
         addr++;
     }
 
@@ -1754,4 +1751,116 @@ void resolve_include_path(const char *base_dir, const char *include_name, char *
         snprintf(temp, sizeof(temp), "%s%s", base_dir, include_name);
         normalize_path(temp, out_path, out_size);
     }
+}
+
+// 确保容量足够存放第 addr 条指令
+static int ensure_word_capacity(int addr)
+{
+    if (addr < g_word_cap) return 0;
+
+    int new_cap = g_word_cap ? g_word_cap * 2 : 256;
+    while (new_cap <= addr) new_cap *= 2;
+
+    uint16_t *p = realloc(g_words, (size_t)new_cap * sizeof(uint16_t));
+    if (!p) {
+        fprintf(stderr, RED "Error:" RESET " Out of memory.\n");
+        return -1;
+    }
+    // 新扩容部分清零（logisim 补零需要，bin/hex 不关心）
+    memset(p + g_word_cap, 0, (size_t)(new_cap - g_word_cap) * sizeof(uint16_t));
+    g_words = p;
+    g_word_cap = new_cap;
+    return 0;
+}
+
+// 记录一条指令（addr 为指令序号）
+static int record_word(int addr, uint16_t code)
+{
+    if (ensure_word_capacity(addr) < 0) return -1;
+    g_words[addr] = code;
+    if (addr + 1 > g_word_count) g_word_count = addr + 1;
+    return 0;
+}
+
+// 释放
+static void free_words(void)
+{
+    free(g_words);
+    g_words = NULL;
+    g_word_count = 0;
+    g_word_cap = 0;
+}
+
+// ---------------- bin：大端 2 字节/指令 ----------------
+static int write_bin(FILE *out)
+{
+    for (int i = 0; i < g_word_count; i++) {
+        uint8_t hi = (g_words[i] >> 8) & 0xFF;
+        uint8_t lo = g_words[i] & 0xFF;
+        if (fwrite(&hi, 1, 1, out) != 1 || fwrite(&lo, 1, 1, out) != 1) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// ---------------- hex：每行一个 %04X ----------------
+static int write_hex(FILE *out)
+{
+    for (int i = 0; i < g_word_count; i++) {
+        if (fprintf(out, "%04X\n", g_words[i]) < 0) return -1;
+    }
+    return 0;
+}
+
+// ---------------- logisim：v3.0 hex words addressed ----------------
+// 地址按字节计；每行 16 个字（=32 字节）；数据补零到 64KB
+static int write_logisim(FILE *out)
+{
+    if (fprintf(out, "v3.0 hex words addressed\n") < 0) return -1;
+
+    // 总字数：补零到 32768 个字（64KB）
+    // 但如果实际指令超过 32768，则按实际长度输出（避免截断）
+    int total_words = g_word_count > LOGISIM_MAX_WORDS
+                        ? g_word_count : LOGISIM_MAX_WORDS;
+
+    int words_per_line = LOGISIM_WORDS_PER_LINE;
+    for (int base = 0; base < total_words; base += words_per_line) {
+        // 地址以字节计：word 序号 * 2
+        unsigned int byte_addr = (unsigned int)base * INSTRUCTION_BYTES;
+        if (fprintf(out, "%04x: ", byte_addr) < 0) return -1;
+
+        for (int k = 0; k < words_per_line; k++) {
+            int idx = base + k;
+            uint16_t w = (idx < g_word_count) ? g_words[idx] : 0x0000;
+            // 字之间用单空格分隔；行尾不要多余空格
+            if (fprintf(out, "%04x", w) < 0) return -1;
+            if (k + 1 < words_per_line) {
+                if (fputc(' ', out) == EOF) return -1;
+            }
+        }
+        if (fputc('\n', out) == EOF) return -1;
+    }
+    return 0;
+}
+
+// 按 format 分派
+static int write_output(FILE *out, const char *format)
+{
+    if (strcmp(format, "bin") == 0) {
+        return write_bin(out);
+    } else if (strcmp(format, "hex") == 0) {
+        return write_hex(out);
+    } else if (strcmp(format, "logisim") == 0) {
+        return write_logisim(out);
+    }
+    return -1;  // 未知格式
+}
+
+// 格式校验
+static int is_valid_format(const char *format)
+{
+    return strcmp(format, "bin") == 0
+        || strcmp(format, "hex") == 0
+        || strcmp(format, "logisim") == 0;
 }
